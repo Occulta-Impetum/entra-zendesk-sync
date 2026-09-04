@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 
 from lib.logging_utils import ConsoleLogTee
-from lib.operational import run_incremental_dry_run
+from lib.operational import initialize_entra_baseline, run_incremental_dry_run
 from lib.runtime import RuntimeOptions, run_read_only
 
 
@@ -33,6 +33,15 @@ def parse_args() -> argparse.Namespace:
         help="Deprecated alias for --full-reconcile.",
     )
     parser.add_argument(
+        "--initialize-baseline",
+        action="store_true",
+        help=(
+            "Collect the current authoritative Entra state and save it as the incremental baseline without "
+            "querying or changing Zendesk. Intended for upgrades where bootstrap completed before baseline "
+            "seeding was added."
+        ),
+    )
+    parser.add_argument(
         "--apply",
         action="store_true",
         help="Apply operational changes. Write execution remains disabled until the incremental plan is validated.",
@@ -42,6 +51,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    selected_modes = sum(bool(value) for value in (
+        args.full_reconcile or args.refresh_zendesk_cache,
+        args.initialize_baseline,
+        args.apply,
+    ))
+    if selected_modes > 1:
+        print("ERROR: --initialize-baseline, --full-reconcile, and --apply cannot be combined.")
+        return 2
+
     if args.apply:
         print(
             "ERROR: operational --apply is intentionally disabled until the new incremental, "
@@ -50,19 +68,23 @@ def main() -> int:
         )
         return 2
 
-    full_reconcile = bool(args.full_reconcile or args.refresh_zendesk_cache)
-    if full_reconcile:
-        options = RuntimeOptions(
-            label="OPERATIONAL FULL RECONCILE DRY RUN",
-            allow_email_bootstrap=False,
-            force_refresh=True,
-            include_bootstrap_review=False,
-        )
-        prefix = "sync_full_reconcile_dry_run"
-        runner = lambda: run_read_only(options)
+    if args.initialize_baseline:
+        prefix = "sync_initialize_baseline"
+        runner = initialize_entra_baseline
     else:
-        prefix = "sync_incremental_dry_run"
-        runner = run_incremental_dry_run
+        full_reconcile = bool(args.full_reconcile or args.refresh_zendesk_cache)
+        if full_reconcile:
+            options = RuntimeOptions(
+                label="OPERATIONAL FULL RECONCILE DRY RUN",
+                allow_email_bootstrap=False,
+                force_refresh=True,
+                include_bootstrap_review=False,
+            )
+            prefix = "sync_full_reconcile_dry_run"
+            runner = lambda: run_read_only(options)
+        else:
+            prefix = "sync_incremental_dry_run"
+            runner = run_incremental_dry_run
 
     try:
         with ConsoleLogTee(prefix=prefix) as log_path:
