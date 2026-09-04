@@ -2,8 +2,8 @@
 """Main entry point for Entra -> Zendesk synchronization.
 
 Safe by default: running without ``--apply`` performs a read-only reconciliation
-and prints the changes that would be made. Write execution is intentionally not
-implemented yet.
+and prints the changes that would be made. Repeat dry runs may reuse a local
+Zendesk user snapshot to avoid repeatedly paging through the full tenant.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 
+from lib.cache import CacheError, load_zendesk_users_cache, save_zendesk_users_cache
 from lib.config import ConfigError, load_config, validate_config
 from lib.graph import (
     GraphError,
@@ -32,12 +33,29 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Synchronize selected Microsoft Entra users to Zendesk."
     )
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
         "--apply",
         action="store_true",
         help=(
             "Apply changes. Write execution is not implemented yet; this flag "
             "is reserved for the next milestone."
+        ),
+    )
+    mode.add_argument(
+        "--final-dry-run",
+        action="store_true",
+        help=(
+            "Perform a fresh read-only reconciliation against live Zendesk data, "
+            "refresh the local cache, and show the expected next --apply plan."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-zendesk-cache",
+        action="store_true",
+        help=(
+            "Ignore any local Zendesk user snapshot and download a fresh one. "
+            "Normal repeated dry runs reuse the cache when available."
         ),
     )
     return parser.parse_args()
@@ -104,8 +122,39 @@ def _print_details(rows: list[dict]) -> None:
         print()
 
 
+def _load_or_refresh_zendesk_users(
+    *,
+    access_token: str,
+    subdomain: str,
+    force_refresh: bool,
+) -> tuple[list[dict], str]:
+    if not force_refresh:
+        cached = load_zendesk_users_cache(subdomain=subdomain)
+        if cached is not None:
+            users, metadata = cached
+            print(
+                "      Using local Zendesk user snapshot: "
+                f"{metadata['path']}"
+            )
+            print(f"      Snapshot fetched at: {metadata['fetched_at']}")
+            print(f"      {len(users)} Zendesk user(s) loaded from cache.")
+            return users, "cache"
+
+    print("      Downloading a fresh Zendesk user snapshot...", flush=True)
+    users = get_users(access_token, subdomain)
+    cache_path = save_zendesk_users_cache(users, subdomain=subdomain)
+    print(f"      {len(users)} Zendesk user(s) loaded from Zendesk.")
+    print(f"      Local snapshot saved to: {cache_path}")
+    return users, "live"
+
+
 def _run(args: argparse.Namespace) -> int:
-    mode = "APPLY" if args.apply else "DRY RUN"
+    if args.apply:
+        mode = "APPLY"
+    elif args.final_dry_run:
+        mode = "FINAL DRY RUN"
+    else:
+        mode = "DRY RUN"
 
     print(f"Entra -> Zendesk Sync ({mode})")
     print("=" * (24 + len(mode)))
@@ -159,9 +208,13 @@ def _run(args: argparse.Namespace) -> int:
         granted_scope = token_data.get("scope") or token_data.get("scopes") or "not reported"
         print(f"      Zendesk authentication successful. Granted scope: {granted_scope}")
 
-        print("\n[5/6] Reading Zendesk users...", flush=True)
-        zendesk_users = get_users(zendesk_token, zendesk_config["subdomain"])
-        print(f"      {len(zendesk_users)} Zendesk user(s) loaded.")
+        print("\n[5/6] Loading Zendesk users...", flush=True)
+        force_refresh = bool(args.final_dry_run or args.refresh_zendesk_cache)
+        zendesk_users, zendesk_source = _load_or_refresh_zendesk_users(
+            access_token=zendesk_token,
+            subdomain=zendesk_config["subdomain"],
+            force_refresh=force_refresh,
+        )
 
         print("\n[6/6] Building reconciliation plan...", flush=True)
         plan = plan_reconciliation(
@@ -177,21 +230,37 @@ def _run(args: argparse.Namespace) -> int:
         counts = summarize_plan(plan)
         print("      Reconciliation plan complete.")
 
-    except (ConfigError, GraphError, ZendeskError, KeyError, ValueError) as exc:
+    except (CacheError, ConfigError, GraphError, ZendeskError, KeyError, ValueError) as exc:
         print(f"\nERROR: {exc}")
         return 1
 
     _print_summary(counts, len(plan))
     _print_details(plan)
 
-    print("DRY RUN COMPLETE: no Zendesk data was modified.")
+    if args.final_dry_run:
+        print("FINAL DRY RUN COMPLETE: no Zendesk data was modified.")
+        print("This run refreshed Zendesk from live data and represents the expected next --apply plan.")
+        print("A later --apply run will re-read live state before writing, so any intervening changes will be detected.")
+    else:
+        print("DRY RUN COMPLETE: no Zendesk data was modified.")
+        if zendesk_source == "cache":
+            print("Zendesk comparison used the local snapshot shown above for faster repeat testing.")
+            print("Use --refresh-zendesk-cache for a fresh snapshot, or --final-dry-run before applying changes.")
+        else:
+            print("Zendesk comparison used live data and refreshed the local snapshot.")
+
     print(f"Only the explicit read-only Zendesk scope '{ZENDESK_DRY_RUN_SCOPE}' was requested.")
     return 0
 
 
 def main() -> int:
     args = parse_args()
-    prefix = "sync_apply" if args.apply else "sync_dry_run"
+    if args.apply:
+        prefix = "sync_apply"
+    elif args.final_dry_run:
+        prefix = "sync_final_dry_run"
+    else:
+        prefix = "sync_dry_run"
 
     try:
         with ConsoleLogTee(prefix=prefix) as log_path:
