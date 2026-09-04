@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Initial Entra -> Zendesk bootstrap/migration workflow."""
+"""Initial Entra -> Zendesk bootstrap/migration workflow.
+
+The bootstrap workflow is intentionally self-contained: it validates the Zendesk
+Job Title and Manager fields, plans/creates Employee ID when needed, collects
+Entra employeeId/jobTitle/manager data, resolves bootstrap identity matches, and
+performs the guarded one-time migration.
+"""
 
 from __future__ import annotations
 
@@ -18,24 +24,27 @@ from lib.runtime import RuntimeOptions, run_read_only  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Initial bootstrap linking of Entra users to existing Zendesk users."
+        description=(
+            "Initial bootstrap linking of Entra users to Zendesk users, including "
+            "Employee ID, Job Title, and Manager field setup/synchronization."
+        )
     )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--final-dry-run",
         action="store_true",
         help=(
-            "Refresh Zendesk from live data and rebuild the approved bootstrap plan. "
-            "This still uses initial email-bootstrap matching because it previews the first migration apply."
+            "Refresh Zendesk from live data, validate user-field schema, collect Entra "
+            "employee/manager data, and rebuild the approved bootstrap plan."
         ),
     )
     mode.add_argument(
         "--apply",
         action="store_true",
         help=(
-            "Execute the one-time bootstrap migration. Re-reads live Entra and Zendesk state, "
-            "refuses unresolved reviews/conflicts, requests users:read users:write, and requires "
-            "an interactive APPLY confirmation before any write."
+            "Execute the one-time bootstrap migration. Re-reads live Entra/Zendesk state, "
+            "creates the Employee ID field after confirmation if it is missing, writes "
+            "identity/title/employee data first, then Manager lookups in a second pass."
         ),
     )
     parser.add_argument(
@@ -48,11 +57,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-
     if args.apply:
-        prefix = "bootstrap_apply"
         try:
-            with ConsoleLogTee(prefix=prefix) as log_path:
+            with ConsoleLogTee(prefix="bootstrap_apply") as log_path:
                 print(f"Log file: {log_path}")
                 exit_code = run_bootstrap_apply()
                 print(f"\nRun complete. Full output saved to: {log_path}")
@@ -69,7 +76,6 @@ def main() -> int:
         include_bootstrap_review=True,
     )
     prefix = "bootstrap_final_dry_run" if final else "bootstrap_dry_run"
-
     try:
         with ConsoleLogTee(prefix=prefix) as log_path:
             print(f"Log file: {log_path}")
