@@ -69,7 +69,9 @@ Production secrets and machine-specific authentication material must not be comm
 
 ### Microsoft Graph
 
-Production use will prefer unattended application authentication with an Entra app registration and certificate-based client credentials.
+Microsoft Graph access uses unattended application authentication with an Entra app registration and certificate-based client credentials.
+
+The initial Entra app registration needs Microsoft Graph application permission `User.Read.All` with tenant admin consent. Additional group-read permissions will be added only when group discovery is implemented.
 
 For Windows administrators, `setup/create_certificate.ps1` can create a self-signed RSA certificate, export the public `.cer` file for upload to Entra, and export a password-protected `.pfx` containing the private key for use by the sync runtime.
 
@@ -81,10 +83,27 @@ Run from PowerShell:
 
 The script writes certificate files under `setup/certificates/` by default. Certificate and private-key files are excluded from Git. Upload only the `.cer` file to the Entra app registration. Keep the `.pfx` file and its password private.
 
+Copy `.env.example` to `.env` and populate:
+
+```text
+ENTRA_TENANT_ID=<Directory tenant ID>
+ENTRA_CLIENT_ID=<Application client ID>
+ENTRA_CERTIFICATE_PATH=C:\path\to\entra-zendesk-sync.pfx
+ENTRA_CERTIFICATE_PASSWORD=<PFX password>
+```
+
+Then validate unattended authentication and `User.Read.All` access:
+
+```powershell
+python .\setup\test_graph_auth.py
+```
+
+The test obtains an app-only token with the PFX certificate and performs a read-only query for five sample users. It prints `displayName`, `userPrincipalName`, `mail`, `accountEnabled`, `companyName`, `officeLocation`, and the Entra object ID. It does not modify Entra data.
+
 ### Zendesk
 
 Zendesk access will use OAuth rather than deprecated Zendesk API tokens.
 
 ## Current status
 
-Repository scaffolding and the Windows certificate setup helper are complete. The next implementation milestone is read-only unattended Microsoft Graph authentication and group discovery.
+Repository scaffolding, Windows certificate setup, and read-only unattended Microsoft Graph authentication are implemented. The next milestone is Entra group discovery and selection.
