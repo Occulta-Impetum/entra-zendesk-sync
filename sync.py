@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Perform a fresh read-only reconciliation against live Zendesk data, "
-            "refresh the local cache, and show the expected next --apply plan."
+            "using the same external-ID-only identity rules as the next --apply run."
         ),
     )
     parser.add_argument(
@@ -167,6 +167,12 @@ def _run(args: argparse.Namespace) -> int:
         )
         return 2
 
+    # Ordinary dry runs are the initial/bootstrap workflow and may use exact
+    # email matching to adopt existing Zendesk users. Final dry run previews
+    # production behavior: external_id is authoritative and email is ignored
+    # for identity matching when an external_id is absent.
+    allow_email_bootstrap = not (args.final_dry_run or args.apply)
+
     try:
         print("\n[1/6] Loading configuration and conflict decisions...", flush=True)
         config = load_config()
@@ -175,6 +181,10 @@ def _run(args: argparse.Namespace) -> int:
         resolutions = load_resolutions()
         print(f"      Configuration valid. {len(mappings)} group mapping(s) loaded.")
         print(f"      {len(resolutions)} saved conflict decision(s) loaded.")
+        if allow_email_bootstrap:
+            print("      Identity mode: INITIAL SETUP (external_id first, then exact email bootstrap).")
+        else:
+            print("      Identity mode: OPERATIONAL (external_id only; missing external_id => CREATE).")
 
         print("\n[2/6] Authenticating to Microsoft Graph...", flush=True)
         graph_config = load_graph_config()
@@ -234,6 +244,7 @@ def _run(args: argparse.Namespace) -> int:
             suspend_when_entra_disabled=_behavior(config, "suspend_when_entra_disabled", True),
             protect_zendesk_staff_roles=_behavior(config, "protect_zendesk_staff_roles", True),
             resolutions=resolutions,
+            allow_email_bootstrap=allow_email_bootstrap,
         )
         plan.extend(membership_conflicts)
         plan.sort(key=lambda row: (str(row.get("action")), str(row.get("name") or "").lower()))
@@ -273,10 +284,12 @@ def _run(args: argparse.Namespace) -> int:
             print("This is NOT ready for --apply because unresolved conflicts remain.")
         else:
             print("No unresolved conflicts remain in the current plan.")
-            print("This run refreshed Zendesk from live data and represents the expected next --apply plan.")
+            print("This run refreshed Zendesk from live data and used production external-ID-only identity rules.")
+            print("An Entra user without a matching entra:<object-id> is planned as CREATE; email is not used to adopt an old user.")
             print("A later --apply run will re-read live state before writing, so intervening changes will be detected.")
     else:
         print("DRY RUN COMPLETE: no Zendesk data was modified.")
+        print("Initial-setup identity rules were used: external_id first, then exact email for one-time adoption.")
         if zendesk_source == "cache":
             print("Zendesk comparison used the local snapshot shown above for faster repeat testing.")
             print("Use --refresh-zendesk-cache for a fresh snapshot, or --final-dry-run before applying changes.")
