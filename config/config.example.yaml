@@ -1,5 +1,6 @@
 # Example non-secret configuration for Entra -> Zendesk Sync.
-# The graphical setup wizard writes config/config.yaml in this format.
+# The graphical setup wizard writes config/config.yaml. The bootstrap workflow
+# discovers the actual Zendesk user-field keys and saves them under zendesk.user_fields.
 
 version: 1
 
@@ -10,6 +11,10 @@ entra:
 zendesk:
   subdomain: "example"
   default_role: "end-user"
+  user_fields:
+    employee_id: employee_id
+    job_title: standard::job_title
+    manager: standard::manager
 
 mappings:
   - entra_group:
