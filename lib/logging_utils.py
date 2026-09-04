@@ -10,6 +10,9 @@ from typing import TextIO
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG_DIR = REPO_ROOT / "logs"
 
+ANSI_BRIGHT_YELLOW = "\033[1;33m"
+ANSI_RESET = "\033[0m"
+
 
 class TeeStream:
     """Mirror text output to the original console stream and a log file."""
@@ -63,3 +66,17 @@ class ConsoleLogTee:
         if self._handle is not None:
             self._handle.flush()
             self._handle.close()
+
+
+def print_attention(text: str) -> None:
+    """Print bright-yellow attention text to the console while keeping logs plain."""
+    stream = sys.stdout
+    if isinstance(stream, TeeStream):
+        stream.console.write(f"{ANSI_BRIGHT_YELLOW}{text}{ANSI_RESET}\n")
+        stream.console.flush()
+        stream.log_file.write(text + "\n")
+        stream.log_file.flush()
+        return
+
+    stream.write(f"{ANSI_BRIGHT_YELLOW}{text}{ANSI_RESET}\n")
+    stream.flush()
