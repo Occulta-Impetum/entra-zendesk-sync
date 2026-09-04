@@ -80,7 +80,11 @@ def get_access_token(
     *,
     scope: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Request a short-lived Zendesk OAuth token using client credentials."""
+    """Request a short-lived Zendesk OAuth token using client credentials.
+
+    ``ZENDESK_OAUTH_SCOPE`` is only the default. Callers can pass an explicit
+    scope so read-only runs never request write permissions.
+    """
     config = config or load_zendesk_config()
     requested_scope = (scope or config["scope"]).strip()
     if not requested_scope:
@@ -198,3 +202,40 @@ def get_organizations(
         organizations,
         key=lambda org: (org.get("name") or "").lower(),
     )
+
+
+def get_users(
+    access_token: str,
+    subdomain: str,
+) -> list[dict[str, Any]]:
+    """Return all Zendesk users needed for reconciliation.
+
+    The sync needs the complete user set so it can match by external_id/email
+    and identify already-linked users who have left all configured Entra groups.
+    """
+    users: list[dict[str, Any]] = []
+    next_url = "users.json"
+    page = 0
+    params: dict[str, str] | None = {"per_page": "100"}
+
+    while next_url:
+        page += 1
+        print(
+            f"      Fetching Zendesk users page {page} "
+            f"({len(users)} received so far)...",
+            flush=True,
+        )
+        payload = zendesk_get(
+            next_url,
+            subdomain=subdomain,
+            access_token=access_token,
+            params=params,
+        )
+        params = None
+        page_items = payload.get("users", [])
+        if not isinstance(page_items, list):
+            raise ZendeskError("Zendesk users response did not contain a list.")
+        users.extend(page_items)
+        next_url = payload.get("next_page") or ""
+
+    return users
