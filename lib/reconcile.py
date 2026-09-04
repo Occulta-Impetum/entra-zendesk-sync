@@ -17,10 +17,44 @@ def _entra_email(user: dict[str, Any]) -> str:
     return _norm_email(user.get("mail") or user.get("userPrincipalName"))
 
 
+def _zendesk_candidate(user: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(user.get("id")) if user.get("id") is not None else None,
+        "name": str(user.get("name") or ""),
+        "email": _norm_email(user.get("email")),
+        "external_id": str(user.get("external_id") or ""),
+        "organization_id": user.get("organization_id"),
+        "role": str(user.get("role") or ""),
+        "suspended": bool(user.get("suspended")),
+    }
+
+
+def _desired_from_mapping(
+    user_id: str,
+    user: dict[str, Any],
+    mapping: dict[str, Any],
+) -> dict[str, Any]:
+    zendesk_org = mapping.get("zendesk_organization") or {}
+    entra_group = mapping.get("entra_group") or {}
+    return {
+        "entra_id": user_id,
+        "name": str(user.get("displayName") or "").strip(),
+        "email": _entra_email(user),
+        "enabled": bool(user.get("accountEnabled")),
+        "group_id": str(entra_group.get("id") or ""),
+        "group_name": str(entra_group.get("name") or ""),
+        "zendesk_org_id": int(zendesk_org["id"]),
+        "zendesk_org_name": str(zendesk_org.get("name") or ""),
+    }
+
+
 def build_desired_users(
     group_members: list[tuple[dict[str, Any], list[dict[str, Any]]]],
+    *,
+    resolutions: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], set[str]]:
-    """Build desired state, conflicts, and the complete set of in-scope Entra IDs."""
+    """Build desired state, unresolved conflicts, and all in-scope Entra IDs."""
+    resolutions = resolutions or {}
     memberships: dict[str, list[dict[str, Any]]] = defaultdict(list)
     users_by_id: dict[str, dict[str, Any]] = {}
 
@@ -39,32 +73,63 @@ def build_desired_users(
     for user_id, mappings in memberships.items():
         user = users_by_id[user_id]
         if len(mappings) != 1:
+            resolution = resolutions.get(user_id, {})
+            decision = str(resolution.get("decision") or "")
+            selected_group_id = str(resolution.get("group_id") or "")
+
+            if decision == "skip":
+                conflicts.append(
+                    {
+                        "action": "SKIP",
+                        "entra_id": user_id,
+                        "name": str(user.get("displayName") or ""),
+                        "email": _entra_email(user),
+                        "reason": "Administrator chose to skip this in-scope Entra user.",
+                        "conflict_type": "multiple_groups",
+                    }
+                )
+                continue
+
+            selected_mapping = next(
+                (
+                    mapping
+                    for mapping in mappings
+                    if str((mapping.get("entra_group") or {}).get("id") or "")
+                    == selected_group_id
+                ),
+                None,
+            )
+            if decision == "use_group" and selected_mapping is not None:
+                desired[user_id] = _desired_from_mapping(user_id, user, selected_mapping)
+                continue
+
+            group_candidates = []
+            for mapping in mappings:
+                entra_group = mapping.get("entra_group") or {}
+                zendesk_org = mapping.get("zendesk_organization") or {}
+                group_candidates.append(
+                    {
+                        "group_id": str(entra_group.get("id") or ""),
+                        "group_name": str(entra_group.get("name") or ""),
+                        "zendesk_org_id": zendesk_org.get("id"),
+                        "zendesk_org_name": str(zendesk_org.get("name") or ""),
+                    }
+                )
             conflicts.append(
                 {
                     "action": "CONFLICT",
+                    "conflict_type": "multiple_groups",
                     "entra_id": user_id,
                     "name": str(user.get("displayName") or ""),
                     "email": _entra_email(user),
                     "reason": "User belongs to multiple mapped Entra groups.",
-                    "groups": [
-                        str((mapping.get("entra_group") or {}).get("name") or "")
-                        for mapping in mappings
-                    ],
+                    "groups": [item["group_name"] for item in group_candidates],
+                    "group_candidates": group_candidates,
                 }
             )
             continue
 
-        mapping = mappings[0]
-        zendesk_org = mapping.get("zendesk_organization") or {}
-        desired[user_id] = {
-            "entra_id": user_id,
-            "name": str(user.get("displayName") or "").strip(),
-            "email": _entra_email(user),
-            "enabled": bool(user.get("accountEnabled")),
-            "group_name": str((mapping.get("entra_group") or {}).get("name") or ""),
-            "zendesk_org_id": int(zendesk_org["id"]),
-            "zendesk_org_name": str(zendesk_org.get("name") or ""),
-        }
+        desired[user_id] = _desired_from_mapping(user_id, user, mappings[0])
 
     return desired, conflicts, in_scope_ids
 
@@ -77,8 +142,10 @@ def plan_reconciliation(
     suspend_when_out_of_scope: bool = True,
     suspend_when_entra_disabled: bool = True,
     protect_zendesk_staff_roles: bool = True,
+    resolutions: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Compare desired Entra state to Zendesk and return a no-write action plan."""
+    resolutions = resolutions or {}
     by_external: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_email: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
@@ -94,17 +161,28 @@ def plan_reconciliation(
     matched_zendesk_ids: set[int] = set()
 
     for entra_id, desired in desired_users.items():
+        resolution = resolutions.get(entra_id, {})
+        decision = str(resolution.get("decision") or "")
         external_id = f"{EXTERNAL_ID_PREFIX}{entra_id}"
         external_matches = by_external.get(external_id, [])
 
         if len(external_matches) > 1:
-            plan.append(
-                _row(desired, "CONFLICT", "Multiple Zendesk users share this Entra external_id.")
-            )
+            if decision == "skip":
+                plan.append(_row(desired, "SKIP", "Administrator chose to skip this Entra user."))
+            else:
+                row = _row(
+                    desired,
+                    "CONFLICT",
+                    "Multiple Zendesk users share this Entra external_id.",
+                )
+                row["conflict_type"] = "multiple_external_id_matches"
+                row["zendesk_candidates"] = [_zendesk_candidate(item) for item in external_matches]
+                plan.append(row)
             continue
 
         zendesk_user: dict[str, Any] | None = None
         matched_by = ""
+        forced_relink = False
 
         if len(external_matches) == 1:
             zendesk_user = external_matches[0]
@@ -113,16 +191,35 @@ def plan_reconciliation(
             email = desired["email"]
             email_matches = by_email.get(email, []) if email else []
             if len(email_matches) > 1:
-                plan.append(
-                    _row(desired, "CONFLICT", "Multiple Zendesk users match the Entra email address.")
+                selected_id = resolution.get("zendesk_user_id")
+                selected = next(
+                    (item for item in email_matches if str(item.get("id")) == str(selected_id)),
+                    None,
                 )
-                continue
-            if len(email_matches) == 1:
+                if decision == "use_zendesk_user" and selected is not None:
+                    zendesk_user = selected
+                    matched_by = "email"
+                elif decision == "skip":
+                    plan.append(_row(desired, "SKIP", "Administrator chose to skip this Entra user."))
+                    continue
+                else:
+                    row = _row(
+                        desired,
+                        "CONFLICT",
+                        "Multiple Zendesk users match the Entra email address.",
+                    )
+                    row["conflict_type"] = "multiple_email_matches"
+                    row["zendesk_candidates"] = [_zendesk_candidate(item) for item in email_matches]
+                    plan.append(row)
+                    continue
+            elif len(email_matches) == 1:
                 zendesk_user = email_matches[0]
                 matched_by = "email"
 
         if zendesk_user is None:
-            if not desired["enabled"]:
+            if decision == "skip":
+                plan.append(_row(desired, "SKIP", "Administrator chose to skip this Entra user."))
+            elif not desired["enabled"]:
                 plan.append(
                     _row(desired, "NO CHANGE", "Entra account is disabled and no Zendesk user exists.")
                 )
@@ -149,21 +246,41 @@ def plan_reconciliation(
 
         existing_external = str(zendesk_user.get("external_id") or "").strip()
         if matched_by == "email" and existing_external and existing_external != external_id:
-            plan.append(
-                _row(
+            allowed_id = resolution.get("zendesk_user_id")
+            allowed_match = allowed_id in (None, "") or str(allowed_id) == str(zendesk_id)
+            if decision == "replace_external_id" and allowed_match:
+                forced_relink = True
+            elif decision == "skip":
+                plan.append(
+                    _row(
+                        desired,
+                        "SKIP",
+                        "Administrator chose not to adopt the email-matched Zendesk user.",
+                        zendesk_user,
+                        matched_by,
+                    )
+                )
+                continue
+            else:
+                row = _row(
                     desired,
                     "CONFLICT",
                     "Email matched a Zendesk user that already has a different external_id.",
                     zendesk_user,
                     matched_by,
                 )
-            )
-            continue
+                row["conflict_type"] = "email_external_id_mismatch"
+                row["zendesk_candidates"] = [_zendesk_candidate(zendesk_user)]
+                plan.append(row)
+                continue
 
         actions: list[str] = []
         reasons: list[str] = []
 
-        if matched_by == "email" and not existing_external:
+        if forced_relink:
+            actions.append("RELINK")
+            reasons.append(f"would replace external_id {existing_external} -> {external_id}")
+        elif matched_by == "email" and not existing_external:
             actions.append("ADOPT")
             reasons.append(f"would set external_id to {external_id}")
 
@@ -276,11 +393,12 @@ def _row(
     zendesk_user: dict[str, Any] | None = None,
     matched_by: str = "",
 ) -> dict[str, Any]:
-    return {
+    row = {
         "action": action,
         "entra_id": desired["entra_id"],
         "name": desired["name"],
         "email": desired["email"],
+        "group_id": desired.get("group_id", ""),
         "group_name": desired["group_name"],
         "zendesk_org_id": desired["zendesk_org_id"],
         "zendesk_org_name": desired["zendesk_org_name"],
@@ -288,3 +406,8 @@ def _row(
         "matched_by": matched_by,
         "reason": reason,
     }
+    if zendesk_user:
+        row["zendesk_name"] = str(zendesk_user.get("name") or "")
+        row["zendesk_email"] = _norm_email(zendesk_user.get("email"))
+        row["zendesk_external_id"] = str(zendesk_user.get("external_id") or "")
+    return row
