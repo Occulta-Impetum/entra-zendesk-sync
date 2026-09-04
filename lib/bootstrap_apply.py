@@ -19,7 +19,6 @@ from lib.graph import (
     GraphError,
     get_graph_access_token,
     get_group_user_members,
-    get_user_managers,
     load_graph_config,
 )
 from lib.reconcile import (
@@ -95,23 +94,16 @@ def _build_live_bootstrap_plan() -> tuple[
     graph_token = get_graph_access_token(graph_config)
     print("      Microsoft Graph authentication successful.")
 
-    print("\n[3/7] Reading Entra users, employee data, and managers...", flush=True)
+    print("\n[3/7] Reading Entra users, employee data, and managers inline...", flush=True)
     group_members: list[tuple[dict, list[dict]]] = []
-    all_user_ids: set[str] = set()
     for index, mapping in enumerate(mappings, start=1):
         entra_group = mapping.get("entra_group") or {}
         group_id = str(entra_group.get("id") or "")
         group_name = str(entra_group.get("name") or group_id)
-        print(f"      [{index}/{len(mappings)}] {group_name}: reading direct user members...", flush=True)
+        print(f"      [{index}/{len(mappings)}] {group_name}: reading direct user members + manager...", flush=True)
         members = get_group_user_members(graph_token, group_id)
         print(f"            {len(members)} user member(s) found.")
-        all_user_ids.update(str(member.get("id") or "") for member in members if member.get("id"))
         group_members.append((mapping, members))
-
-    managers = get_user_managers(graph_token, all_user_ids)
-    for _mapping, members in group_members:
-        for member in members:
-            member["manager"] = managers.get(str(member.get("id") or ""))
 
     desired_users, membership_conflicts, in_scope_ids = build_desired_users(
         group_members, resolutions=resolutions
