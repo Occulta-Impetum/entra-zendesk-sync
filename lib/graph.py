@@ -182,7 +182,8 @@ def get_sample_users(access_token: str, limit: int = 5) -> list[dict[str, Any]]:
 def get_security_groups(access_token: str) -> list[dict[str, Any]]:
     """Return Entra security groups, sorted by display name.
 
-    This uses only basic group properties needed by the setup workflow.
+    Graph does not support combining this securityEnabled filter with server-side
+    displayName ordering in this query shape, so results are sorted locally.
     """
     groups = graph_get_all(
         "/groups",
@@ -190,7 +191,6 @@ def get_security_groups(access_token: str) -> list[dict[str, Any]]:
         params={
             "$select": "id,displayName,description,mailEnabled,securityEnabled,groupTypes",
             "$filter": "securityEnabled eq true",
-            "$orderby": "displayName",
             "$top": "100",
         },
         progress_label="security groups",
