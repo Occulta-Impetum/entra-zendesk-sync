@@ -24,8 +24,6 @@ class ZendeskError(RuntimeError):
 
 def load_zendesk_config() -> dict[str, str]:
     """Load and validate Zendesk OAuth configuration from .env/environment."""
-    # Project-local .env values are authoritative so stale shell/VS Code
-    # environment variables cannot silently override the current configuration.
     load_dotenv(override=True)
 
     config = {
@@ -60,7 +58,6 @@ def load_zendesk_config() -> dict[str, str]:
 
 
 def _safe_error_detail(response: requests.Response, secret: str = "") -> str:
-    """Return useful API error text without exposing credentials."""
     try:
         body = response.json()
         if isinstance(body, dict):
@@ -81,124 +78,23 @@ def _safe_error_detail(response: requests.Response, secret: str = "") -> str:
     return " ".join(detail.split())[:750]
 
 
-def _normalize_scope(scope: str) -> str:
-    """Normalize an OAuth scope string so equivalent scope sets share one cache entry."""
-    return " ".join(sorted({part for part in scope.split() if part}))
-
-
-def _token_cache_key(config: dict[str, str], normalized_scope: str) -> str:
-    """Return a stable non-secret key for one tenant/client/exact scope set."""
-    return f"{config['subdomain'].lower()}|{config['client_id']}|{normalized_scope}"
+def _scope_key(scope: str) -> str:
+    return " ".join(sorted(set(scope.split())))
 
 
 def _load_token_cache() -> dict[str, Any]:
-    """Load the local OAuth cache; a corrupt cache is ignored safely."""
     try:
-        with TOKEN_CACHE_PATH.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except FileNotFoundError:
-        return {"version": 1, "entries": {}}
-    except (OSError, ValueError, TypeError):
-        return {"version": 1, "entries": {}}
-
-    if not isinstance(data, dict) or not isinstance(data.get("entries"), dict):
-        return {"version": 1, "entries": {}}
-    return data
+        if not TOKEN_CACHE_PATH.exists():
+            return {}
+        data = json.loads(TOKEN_CACHE_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def _save_token_cache(cache: dict[str, Any]) -> None:
-    """Atomically save cached OAuth tokens under the already-gitignored cache folder."""
-    try:
-        TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        temp_path = TOKEN_CACHE_PATH.with_suffix(TOKEN_CACHE_PATH.suffix + ".tmp")
-        with temp_path.open("w", encoding="utf-8") as handle:
-            json.dump(cache, handle, indent=2, sort_keys=True)
-            handle.write("\n")
-        os.replace(temp_path, TOKEN_CACHE_PATH)
-    except OSError as exc:
-        # A cache failure must not prevent authentication. The caller can still
-        # use the newly issued in-memory token for this run.
-        print(f"      WARNING: Unable to save Zendesk OAuth token cache: {exc}")
-
-
-def _get_cached_token(
-    config: dict[str, str],
-    normalized_scope: str,
-) -> tuple[str, dict[str, Any]] | None:
-    """Return a still-valid token for the exact requested scope set, if available."""
-    cache = _load_token_cache()
-    key = _token_cache_key(config, normalized_scope)
-    entry = cache.get("entries", {}).get(key)
-    if not isinstance(entry, dict):
-        return None
-
-    token = str(entry.get("access_token") or "")
-    try:
-        expires_at = float(entry.get("expires_at") or 0)
-    except (TypeError, ValueError):
-        return None
-
-    now = time.time()
-    if not token or expires_at <= now + TOKEN_EXPIRY_MARGIN_SECONDS:
-        return None
-
-    seconds_left = max(0, int(expires_at - now))
-    print(
-        "      Reusing cached Zendesk OAuth token "
-        f"for exact scopes [{normalized_scope}] (~{seconds_left // 60} min remaining)."
-    )
-    token_data = {
-        "access_token": token,
-        "token_type": entry.get("token_type") or "bearer",
-        "expires_in": seconds_left,
-        "scope": entry.get("scope") or normalized_scope,
-        "cached": True,
-    }
-    return token, token_data
-
-
-def _cache_token(
-    *,
-    config: dict[str, str],
-    normalized_scope: str,
-    token: str,
-    token_data: dict[str, Any],
-) -> None:
-    """Cache an expiring client-credentials token for reuse across script runs."""
-    try:
-        expires_in = int(token_data.get("expires_in") or 0)
-    except (TypeError, ValueError):
-        expires_in = 0
-
-    if expires_in <= TOKEN_EXPIRY_MARGIN_SECONDS:
-        print(
-            "      Zendesk OAuth response did not provide a reusable expiration window; "
-            "this token will be used only for the current process."
-        )
-        return
-
-    cache = _load_token_cache()
-    entries = cache.setdefault("entries", {})
-    if not isinstance(entries, dict):
-        entries = {}
-        cache["entries"] = entries
-
-    key = _token_cache_key(config, normalized_scope)
-    granted_scope = _normalize_scope(str(token_data.get("scope") or normalized_scope))
-    entries[key] = {
-        "access_token": token,
-        "expires_at": time.time() + expires_in,
-        "scope": granted_scope,
-        "token_type": str(token_data.get("token_type") or "bearer"),
-        "subdomain": config["subdomain"],
-        "client_id": config["client_id"],
-    }
-    cache["version"] = 1
-    _save_token_cache(cache)
-    print(
-        "      Cached new Zendesk OAuth token "
-        f"for exact scopes [{normalized_scope}] (expires in ~{expires_in // 60} min)."
-    )
+    TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    TOKEN_CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
 
 
 def get_access_token(
@@ -207,41 +103,41 @@ def get_access_token(
     scope: str | None = None,
     force_new: bool = False,
 ) -> tuple[str, dict[str, Any]]:
-    """Return a Zendesk client-credentials access token.
-
-    Tokens are cached locally and reused until shortly before expiration. Cache
-    entries are keyed by tenant, OAuth client, and the *exact* requested scope
-    set so a broader token is never silently substituted for a least-privilege
-    request. Client-credentials tokens have no refresh token; once a cached
-    token expires, this function repeats the client-credentials request.
-
-    ``ZENDESK_OAUTH_SCOPE`` is only the default. Callers should pass an explicit
-    scope whenever practical so read-only runs never request write permissions.
-    """
+    """Return a cached unexpired token or request a new client-credentials token."""
     config = config or load_zendesk_config()
     requested_scope = (scope or config["scope"]).strip()
-    normalized_scope = _normalize_scope(requested_scope)
-    if not normalized_scope:
+    if not requested_scope:
         raise ZendeskError("Zendesk OAuth scope cannot be empty.")
 
-    if not force_new:
-        cached = _get_cached_token(config, normalized_scope)
-        if cached is not None:
-            return cached
+    scope_key = _scope_key(requested_scope)
+    cache_key = f"{config['subdomain']}|{config['client_id']}|{scope_key}"
+    now = time.time()
+    cache = _load_token_cache()
+    cached = cache.get(cache_key) if isinstance(cache.get(cache_key), dict) else None
+    if cached and not force_new:
+        token = str(cached.get("access_token") or "")
+        expires_at = float(cached.get("expires_at") or 0)
+        if token and expires_at - TOKEN_EXPIRY_MARGIN_SECONDS > now:
+            remaining = max(0, int((expires_at - now) / 60))
+            print(
+                f"      Reusing cached Zendesk OAuth token for exact scopes [{scope_key}] "
+                f"(~{remaining} min remaining)."
+            )
+            return token, {
+                "access_token": token,
+                "scope": scope_key,
+                "expires_in": max(0, int(expires_at - now)),
+                "cached": True,
+            }
 
-    print(
-        "      Requesting a new Zendesk OAuth token "
-        f"for exact scopes [{normalized_scope}]...",
-        flush=True,
-    )
+    print(f"      Requesting a new Zendesk OAuth token for exact scopes [{scope_key}]...")
     url = f"https://{config['subdomain']}.zendesk.com/oauth/tokens"
     payload = {
         "grant_type": "client_credentials",
         "client_id": config["client_id"],
         "client_secret": config["client_secret"],
-        "scope": normalized_scope,
+        "scope": requested_scope,
     }
-
     try:
         response = requests.post(
             url,
@@ -265,21 +161,23 @@ def get_access_token(
     except ValueError as exc:
         raise ZendeskError("Zendesk returned an invalid OAuth response.") from exc
 
-    if not isinstance(data, dict):
-        raise ZendeskError("Zendesk returned an invalid OAuth response object.")
-
     token = data.get("access_token")
     if not token:
         raise ZendeskError("Zendesk OAuth response did not contain an access token.")
 
-    # Preserve an explicit scope value for callers/logging even if Zendesk omits
-    # it from an otherwise valid response.
-    data.setdefault("scope", normalized_scope)
-    _cache_token(
-        config=config,
-        normalized_scope=normalized_scope,
-        token=str(token),
-        token_data=data,
+    expires_in = int(data.get("expires_in") or 1800)
+    cache[cache_key] = {
+        "access_token": str(token),
+        "scope": scope_key,
+        "expires_at": now + expires_in,
+    }
+    try:
+        _save_token_cache(cache)
+    except OSError:
+        pass
+    print(
+        f"      Cached new Zendesk OAuth token for exact scopes [{scope_key}] "
+        f"(expires in ~{max(0, int(expires_in / 60) - 1)} min)."
     )
     return str(token), data
 
@@ -293,13 +191,11 @@ def zendesk_request(
     params: dict[str, str] | None = None,
     json_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Perform an authenticated Zendesk API request and return JSON when present."""
     url = (
         path_or_url
         if path_or_url.lower().startswith("https://")
         else f"https://{subdomain}.zendesk.com/api/v2/{path_or_url.lstrip('/')}"
     )
-
     try:
         response = requests.request(
             method.upper(),
@@ -338,7 +234,6 @@ def zendesk_get(
     access_token: str,
     params: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Perform an authenticated GET request against the Zendesk API."""
     return zendesk_request(
         "GET",
         path_or_url,
@@ -346,6 +241,63 @@ def zendesk_get(
         access_token=access_token,
         params=params,
     )
+
+
+def get_user_fields(access_token: str, subdomain: str) -> list[dict[str, Any]]:
+    """Return all Zendesk custom/standard user field definitions."""
+    fields: list[dict[str, Any]] = []
+    next_url = "user_fields.json"
+    page = 0
+    params: dict[str, str] | None = {"per_page": "100"}
+    while next_url:
+        page += 1
+        print(
+            f"      Fetching Zendesk user fields page {page} ({len(fields)} received so far)...",
+            flush=True,
+        )
+        payload = zendesk_get(
+            next_url,
+            subdomain=subdomain,
+            access_token=access_token,
+            params=params,
+        )
+        params = None
+        page_items = payload.get("user_fields", [])
+        if not isinstance(page_items, list):
+            raise ZendeskError("Zendesk user-fields response did not contain a list.")
+        fields.extend(page_items)
+        next_url = str(payload.get("next_page") or "")
+    return fields
+
+
+def create_user_field(
+    access_token: str,
+    subdomain: str,
+    *,
+    title: str,
+    key: str,
+    field_type: str = "text",
+) -> dict[str, Any]:
+    """Create one Zendesk user field and return its definition."""
+    payload = {
+        "user_field": {
+            "title": title,
+            "key": key,
+            "type": field_type,
+            "active": True,
+        }
+    }
+    data = zendesk_request(
+        "POST",
+        "user_fields.json",
+        subdomain=subdomain,
+        access_token=access_token,
+        json_body=payload,
+    )
+    field = data.get("user_field")
+    if not isinstance(field, dict):
+        raise ZendeskError("Zendesk create-user-field response did not contain a user_field object.")
+    return field
 
 
 def create_user(
@@ -356,23 +308,23 @@ def create_user(
     email: str,
     external_id: str,
     organization_id: int,
+    user_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Create one Zendesk end user for an Entra-managed identity."""
-    payload = {
-        "user": {
-            "name": name,
-            "email": email,
-            "external_id": external_id,
-            "organization_id": organization_id,
-            "role": "end-user",
-        }
+    user_payload: dict[str, Any] = {
+        "name": name,
+        "email": email,
+        "external_id": external_id,
+        "organization_id": organization_id,
+        "role": "end-user",
     }
+    if user_fields:
+        user_payload["user_fields"] = user_fields
     data = zendesk_request(
         "POST",
         "users.json",
         subdomain=subdomain,
         access_token=access_token,
-        json_body=payload,
+        json_body={"user": user_payload},
     )
     user = data.get("user")
     if not isinstance(user, dict) or user.get("id") is None:
@@ -387,7 +339,6 @@ def update_user(
     *,
     fields: dict[str, Any],
 ) -> dict[str, Any]:
-    """Update writable fields on one Zendesk user."""
     if not fields:
         return {}
     data = zendesk_request(
@@ -403,21 +354,15 @@ def update_user(
     return user
 
 
-def get_organizations(
-    access_token: str,
-    subdomain: str,
-) -> list[dict[str, Any]]:
-    """Return all Zendesk organizations with visible pagination progress."""
+def get_organizations(access_token: str, subdomain: str) -> list[dict[str, Any]]:
     organizations: list[dict[str, Any]] = []
     next_url = "organizations.json"
     page = 0
     params: dict[str, str] | None = {"per_page": "100"}
-
     while next_url:
         page += 1
         print(
-            f"      Fetching organizations page {page} "
-            f"({len(organizations)} received so far)...",
+            f"      Fetching organizations page {page} ({len(organizations)} received so far)...",
             flush=True,
         )
         payload = zendesk_get(
@@ -432,32 +377,18 @@ def get_organizations(
             raise ZendeskError("Zendesk organizations response did not contain a list.")
         organizations.extend(page_items)
         next_url = payload.get("next_page") or ""
-
-    return sorted(
-        organizations,
-        key=lambda org: (org.get("name") or "").lower(),
-    )
+    return sorted(organizations, key=lambda org: (org.get("name") or "").lower())
 
 
-def get_users(
-    access_token: str,
-    subdomain: str,
-) -> list[dict[str, Any]]:
-    """Return all Zendesk users needed for reconciliation.
-
-    The sync needs the complete user set so it can match by external_id/email
-    and identify already-linked users who have left all configured Entra groups.
-    """
+def get_users(access_token: str, subdomain: str) -> list[dict[str, Any]]:
     users: list[dict[str, Any]] = []
     next_url = "users.json"
     page = 0
     params: dict[str, str] | None = {"per_page": "100"}
-
     while next_url:
         page += 1
         print(
-            f"      Fetching Zendesk users page {page} "
-            f"({len(users)} received so far)...",
+            f"      Fetching Zendesk users page {page} ({len(users)} received so far)...",
             flush=True,
         )
         payload = zendesk_get(
@@ -472,5 +403,4 @@ def get_users(
             raise ZendeskError("Zendesk users response did not contain a list.")
         users.extend(page_items)
         next_url = payload.get("next_page") or ""
-
     return users
