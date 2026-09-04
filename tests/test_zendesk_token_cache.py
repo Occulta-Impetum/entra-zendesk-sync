@@ -22,9 +22,13 @@ class ZendeskTokenCacheTests(unittest.TestCase):
         }
         self.cache_patch = patch.object(zendesk, "TOKEN_CACHE_PATH", self.cache_path)
         self.cache_patch.start()
+        zendesk._TOKEN_CONTEXT.clear()
+        zendesk._TOKEN_REPLACEMENTS.clear()
 
     def tearDown(self) -> None:
         self.cache_patch.stop()
+        zendesk._TOKEN_CONTEXT.clear()
+        zendesk._TOKEN_REPLACEMENTS.clear()
         self.tempdir.cleanup()
 
     def _response(self, *, token: str = "new-token", expires_in: int = 1800, scope: str = "users:read") -> Mock:
@@ -36,6 +40,16 @@ class ZendeskTokenCacheTests(unittest.TestCase):
             "expires_in": expires_in,
             "scope": scope,
         }
+        return response
+
+    def _api_response(self, *, status: int, body: dict) -> Mock:
+        response = Mock()
+        response.status_code = status
+        response.ok = 200 <= status < 300
+        response.url = "https://example.zendesk.com/api/v2/users/1.json"
+        response.content = b"{}" if body else b""
+        response.json.return_value = body
+        response.text = json.dumps(body)
         return response
 
     def _cache_key(self, scope: str) -> str:
@@ -108,6 +122,29 @@ class ZendeskTokenCacheTests(unittest.TestCase):
         self.assertEqual("first-token", first)
         self.assertEqual("second-token", second)
         self.assertEqual(2, post.call_count)
+
+    @patch("lib.zendesk.requests.request")
+    @patch("lib.zendesk.requests.post")
+    def test_401_refreshes_same_scope_and_retries_once(self, post: Mock, request: Mock) -> None:
+        post.side_effect = [
+            self._response(token="first-token"),
+            self._response(token="replacement-token"),
+        ]
+        request.side_effect = [
+            self._api_response(status=401, body={"error": "invalid_token"}),
+            self._api_response(status=200, body={"user": {"id": 1}}),
+        ]
+
+        token, _ = zendesk.get_access_token(self.config, scope="users:read")
+        payload = zendesk.zendesk_get("users/1.json", subdomain="example", access_token=token)
+
+        self.assertEqual(payload["user"]["id"], 1)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(request.call_count, 2)
+        self.assertEqual(
+            request.call_args_list[1].kwargs["headers"]["Authorization"],
+            "Bearer replacement-token",
+        )
 
 
 if __name__ == "__main__":
