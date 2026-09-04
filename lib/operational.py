@@ -49,9 +49,7 @@ def _field_keys(config: dict[str, Any]) -> dict[str, str]:
     return required
 
 
-def _normalize_current(
-    desired_users: dict[str, dict[str, Any]],
-) -> dict[str, dict[str, Any]]:
+def _normalize_current(desired_users: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     current: dict[str, dict[str, Any]] = {}
     for entra_id, desired in desired_users.items():
         current[entra_id] = {
@@ -95,16 +93,11 @@ def collect_current_entra_state() -> tuple[dict[str, Any], dict[str, dict[str, A
     if unresolved:
         return config, {}, unresolved
 
-    current = _normalize_current(desired)
-    return config, current, membership_rows
+    return config, _normalize_current(desired), membership_rows
 
 
 def initialize_entra_baseline() -> int:
-    """Seed the local Entra baseline without reading or changing Zendesk.
-
-    This exists primarily for upgrades from pre-incremental bootstrap versions.
-    New successful bootstrap applies seed the baseline automatically.
-    """
+    """Seed the local Entra baseline without reading or changing Zendesk."""
     print("Entra -> Zendesk Sync (INITIALIZE ENTRA BASELINE)")
     print("===============================================")
     try:
@@ -146,27 +139,16 @@ def _history_record(cache: dict[str, Any] | None, entra_id: str) -> dict[str, An
     return value if isinstance(value, dict) else None
 
 
-def _resolve_manager_target(
-    record: dict[str, Any],
-    *,
-    token: str,
-    subdomain: str,
-) -> tuple[int | None, str]:
-    manager_id = str(record.get("manager_entra_id") or "").strip()
-    manager_email = str(record.get("manager_email") or "").strip().lower()
-    if manager_id:
-        matches = find_users_by_external_id(token, subdomain, f"{EXTERNAL_ID_PREFIX}{manager_id}")
-        if len(matches) == 1:
-            return int(matches[0]["id"]), "manager external_id"
-        if len(matches) > 1:
-            return None, "multiple Zendesk users share manager external_id"
-    if manager_email:
-        matches = find_users_by_email(token, subdomain, manager_email)
-        if len(matches) == 1:
-            return int(matches[0]["id"]), "manager email fallback (relationship resolution only)"
-        if len(matches) > 1:
-            return None, "multiple Zendesk users match manager email"
-    return None, "manager Zendesk identity not found"
+def _manager_action(record: dict[str, Any]) -> str:
+    return "UPDATE MANAGER" if record.get("manager_entra_id") or record.get("manager_email") else ""
+
+
+def _create_action(record: dict[str, Any], *, email_reuse: bool = False) -> str:
+    actions = ["EMAIL REUSE", "CREATE"] if email_reuse else ["CREATE"]
+    manager_action = _manager_action(record)
+    if manager_action:
+        actions.append(manager_action)
+    return " + ".join(actions)
 
 
 def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any] | None]:
@@ -185,6 +167,10 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
     )
     if previous_cache is None:
         print("      No prior Entra cache exists; this first operational run will inspect all current users once.")
+
+    if not new_ids and not changed_ids and not removed_ids:
+        print("      No authoritative Entra changes; skipping Zendesk authentication and lookups.")
+        return [], current, previous_cache
 
     print("\n[2/4] Authenticating to Zendesk with read-only user scope...", flush=True)
     zendesk_config = load_zendesk_config()
@@ -211,7 +197,14 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
         if len(matches) == 0:
             email_matches = find_users_by_email(token, zendesk_config["subdomain"], record["email"])
             if not email_matches:
-                plan.append({**record, "action": "CREATE", "reason": "No Zendesk user has this external_id or email.", "changed_fields": sorted(delta)})
+                plan.append({
+                    **record,
+                    "action": _create_action(record),
+                    "reason": "No Zendesk user has this external_id or email.",
+                    "changed_fields": sorted(delta),
+                    "fields_to_write": {},
+                    "manager_deferred": bool(_manager_action(record)),
+                })
                 continue
             if len(email_matches) > 1:
                 plan.append({**record, "action": "CONFLICT", "reason": "Multiple Zendesk users currently own the desired email address."})
@@ -232,13 +225,15 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
             old_external = str(owner_full.get("external_id") or "").strip()
             old_entra_id = old_external[len(EXTERNAL_ID_PREFIX):] if old_external.lower().startswith(EXTERNAL_ID_PREFIX) else ""
             old_record = _history_record(previous_cache, old_entra_id) if old_entra_id else None
-            if (
+            retired_proven = (
                 old_entra_id
                 and old_entra_id != entra_id
                 and old_entra_id not in current
-                and old_record
+                and old_record is not None
                 and str(old_record.get("employee_id") or "").strip()
-            ):
+                and bool(owner_full.get("suspended"))
+            )
+            if retired_proven:
                 historical_email = _collision_email(record["email"], str(old_record["employee_id"]))
                 existing_alias = find_users_by_email(token, zendesk_config["subdomain"], historical_email)
                 if existing_alias:
@@ -246,20 +241,26 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
                     continue
                 plan.append({
                     **record,
-                    "action": "EMAIL REUSE + CREATE",
-                    "reason": "Desired email belongs to a previously managed Entra identity that is no longer present.",
+                    "action": _create_action(record, email_reuse=True),
+                    "reason": "Desired email belongs to a suspended, previously managed Entra identity that is no longer present.",
                     "old_zendesk_id": int(owner_full["id"]),
                     "old_entra_id": old_entra_id,
                     "old_employee_id": str(old_record["employee_id"]),
                     "rename_old_email_to": historical_email,
                     "changed_fields": sorted(delta),
+                    "fields_to_write": {},
+                    "manager_deferred": bool(_manager_action(record)),
                 })
                 continue
 
             plan.append({
                 **record,
                 "action": "CONFLICT",
-                "reason": "Desired email is already owned by a Zendesk identity that cannot be proven to be a retired Entra user.",
+                "reason": (
+                    "Desired email is already owned by a Zendesk identity that cannot be proven retired. "
+                    "Automatic reuse requires a different managed Entra external_id, retained Employee ID history, "
+                    "absence from the current Entra snapshot, and a suspended old Zendesk end-user."
+                ),
                 "zendesk_id": int(owner_full["id"]),
                 "zendesk_external_id": old_external,
             })
@@ -293,21 +294,9 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
         if user_fields:
             fields_to_write["user_fields"] = user_fields
 
-        manager_target = None
-        manager_reason = ""
-        if "new" in delta or "manager_entra_id" in delta or "manager_email" in delta:
-            if record["manager_entra_id"] or record["manager_email"]:
-                manager_target, manager_reason = _resolve_manager_target(record, token=token, subdomain=zendesk_config["subdomain"])
-                if manager_target is None:
-                    plan.append({**record, "action": "CONFLICT", "zendesk_id": int(zendesk_user["id"]), "reason": manager_reason})
-                    continue
-                user_fields = fields_to_write.setdefault("user_fields", {})
-                user_fields[field_keys["manager"]] = str(manager_target)
-                actions.append("UPDATE MANAGER")
-            else:
-                user_fields = fields_to_write.setdefault("user_fields", {})
-                user_fields[field_keys["manager"]] = None
-                actions.append("CLEAR MANAGER")
+        manager_changed = "new" in delta or "manager_entra_id" in delta or "manager_email" in delta
+        if manager_changed:
+            actions.append("UPDATE MANAGER" if _manager_action(record) else "CLEAR MANAGER")
 
         plan.append({
             **record,
@@ -316,7 +305,7 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
             "reason": "Authoritative Entra fields changed since the last successful operational snapshot." if actions else "No authoritative Entra fields changed.",
             "changed_fields": sorted(delta),
             "fields_to_write": fields_to_write,
-            "manager_resolution": manager_reason,
+            "manager_deferred": manager_changed,
         })
 
     print(f"\n[4/4] Inspecting {len(removed_ids)} Entra user(s) removed from provisioning scope...", flush=True)
@@ -325,14 +314,25 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
         print(f"      [{index}/{len(removed_ids)}] {old_record.get('name') or entra_id}...", flush=True)
         matches = find_users_by_external_id(token, zendesk_config["subdomain"], f"{EXTERNAL_ID_PREFIX}{entra_id}")
         if len(matches) == 1:
-            plan.append({
-                **old_record,
-                "entra_id": entra_id,
-                "action": "SUSPEND",
-                "zendesk_id": int(matches[0]["id"]),
-                "reason": "Previously managed Entra identity is no longer in provisioning scope.",
-                "fields_to_write": {"suspended": True},
-            })
+            zendesk_user = get_user(token, zendesk_config["subdomain"], int(matches[0]["id"]))
+            role = str(zendesk_user.get("role") or "").lower()
+            if role in {"admin", "agent"}:
+                plan.append({
+                    **old_record,
+                    "entra_id": entra_id,
+                    "action": "PROTECTED",
+                    "zendesk_id": int(zendesk_user["id"]),
+                    "reason": f"Removed Entra identity is a Zendesk {role}; staff roles are protected from suspension.",
+                })
+            else:
+                plan.append({
+                    **old_record,
+                    "entra_id": entra_id,
+                    "action": "SUSPEND",
+                    "zendesk_id": int(zendesk_user["id"]),
+                    "reason": "Previously managed Entra identity is no longer in provisioning scope.",
+                    "fields_to_write": {"suspended": True},
+                })
         elif len(matches) > 1:
             plan.append({**old_record, "entra_id": entra_id, "action": "CONFLICT", "reason": "Multiple Zendesk users share the removed Entra external_id."})
         else:
@@ -344,12 +344,7 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
 def summarize_incremental_plan(plan: list[dict[str, Any]]) -> Counter[str]:
     counts: Counter[str] = Counter()
     for row in plan:
-        action = str(row.get("action") or "")
-        if action == "EMAIL REUSE + CREATE":
-            counts["EMAIL REUSE"] += 1
-            counts["CREATE"] += 1
-            continue
-        for part in [piece.strip() for piece in action.split("+") if piece.strip()]:
+        for part in [piece.strip() for piece in str(row.get("action") or "").split("+") if piece.strip()]:
             counts[part] += 1
     return counts
 
