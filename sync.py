@@ -11,6 +11,13 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 
+from lib.bootstrap_review import (
+    BootstrapReviewError,
+    build_review_candidates,
+    load_review_decisions,
+    save_review_candidates,
+    unresolved_review_candidates,
+)
 from lib.cache import CacheError, load_zendesk_users_cache, save_zendesk_users_cache
 from lib.config import ConfigError, load_config, validate_config
 from lib.conflicts import ConflictSnapshotError, save_conflicts
@@ -174,13 +181,15 @@ def _run(args: argparse.Namespace) -> int:
     allow_email_bootstrap = not (args.final_dry_run or args.apply)
 
     try:
-        print("\n[1/6] Loading configuration and conflict decisions...", flush=True)
+        print("\n[1/6] Loading configuration and review decisions...", flush=True)
         config = load_config()
         validate_config(config)
         mappings = list(config["mappings"])
         resolutions = load_resolutions()
+        bootstrap_decisions = load_review_decisions()
         print(f"      Configuration valid. {len(mappings)} group mapping(s) loaded.")
         print(f"      {len(resolutions)} saved conflict decision(s) loaded.")
+        print(f"      {len(bootstrap_decisions)} saved initial-match review decision(s) loaded.")
         if allow_email_bootstrap:
             print("      Identity mode: INITIAL SETUP (external_id first, then exact email bootstrap).")
         else:
@@ -251,12 +260,33 @@ def _run(args: argparse.Namespace) -> int:
         counts = summarize_plan(plan)
         unresolved_conflicts = [row for row in plan if row.get("action") == "CONFLICT"]
         conflict_path = save_conflicts(unresolved_conflicts)
+
+        bootstrap_candidates: list[dict] = []
+        unresolved_bootstrap_reviews: list[dict] = []
+        bootstrap_review_path = None
+        if allow_email_bootstrap:
+            bootstrap_candidates = build_review_candidates(plan)
+            bootstrap_review_path = save_review_candidates(bootstrap_candidates)
+            unresolved_bootstrap_reviews = unresolved_review_candidates(
+                bootstrap_candidates,
+                bootstrap_decisions,
+            )
+
         print("      Reconciliation plan complete.")
         print(
             f"      {len(unresolved_conflicts)} unresolved conflict(s) saved to: {conflict_path}"
         )
+        if allow_email_bootstrap and bootstrap_review_path is not None:
+            print(
+                f"      {len(bootstrap_candidates)} initial email/name review candidate(s) saved to: "
+                f"{bootstrap_review_path}"
+            )
+            print(
+                f"      {len(unresolved_bootstrap_reviews)} initial match review(s) still require approval."
+            )
 
     except (
+        BootstrapReviewError,
         CacheError,
         ConfigError,
         ConflictSnapshotError,
@@ -280,6 +310,15 @@ def _run(args: argparse.Namespace) -> int:
         )
         print()
 
+    if allow_email_bootstrap and unresolved_bootstrap_reviews:
+        print_attention(
+            "\n!!! INITIAL MATCH REVIEW REQUIRED !!!\n"
+            f"{len(unresolved_bootstrap_reviews)} email-matched user(s) have a different Zendesk name.\n"
+            "Run: python .\\setup\\review_bootstrap_matches.py\n"
+            "Then run the dry run again to confirm those decisions."
+        )
+        print()
+
     if args.final_dry_run:
         print("FINAL DRY RUN COMPLETE: no Zendesk data was modified.")
         if unresolved_conflicts:
@@ -292,6 +331,10 @@ def _run(args: argparse.Namespace) -> int:
     else:
         print("DRY RUN COMPLETE: no Zendesk data was modified.")
         print("Initial-setup identity rules were used: external_id first, then exact email for one-time adoption.")
+        if unresolved_bootstrap_reviews:
+            print("Initial setup is NOT ready for application because email/name reviews still require approval.")
+        else:
+            print("No unresolved initial email/name reviews remain.")
         if zendesk_source == "cache":
             print("Zendesk comparison used the local snapshot shown above for faster repeat testing.")
             print("Use --refresh-zendesk-cache for a fresh snapshot, or --final-dry-run before applying changes.")
