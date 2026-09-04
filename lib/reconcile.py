@@ -19,12 +19,8 @@ def _entra_email(user: dict[str, Any]) -> str:
 
 def build_desired_users(
     group_members: list[tuple[dict[str, Any], list[dict[str, Any]]]],
-) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    """Build desired user state and identify multiple-mapped-group conflicts.
-
-    ``group_members`` contains ``(mapping, members)`` tuples where each mapping
-    is one configured Entra-group -> Zendesk-organization mapping.
-    """
+) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], set[str]]:
+    """Build desired state, conflicts, and the complete set of in-scope Entra IDs."""
     memberships: dict[str, list[dict[str, Any]]] = defaultdict(list)
     users_by_id: dict[str, dict[str, Any]] = {}
 
@@ -38,6 +34,7 @@ def build_desired_users(
 
     desired: dict[str, dict[str, Any]] = {}
     conflicts: list[dict[str, Any]] = []
+    in_scope_ids = set(memberships)
 
     for user_id, mappings in memberships.items():
         user = users_by_id[user_id]
@@ -69,13 +66,14 @@ def build_desired_users(
             "zendesk_org_name": str(zendesk_org.get("name") or ""),
         }
 
-    return desired, conflicts
+    return desired, conflicts, in_scope_ids
 
 
 def plan_reconciliation(
     desired_users: dict[str, dict[str, Any]],
     zendesk_users: list[dict[str, Any]],
     *,
+    in_scope_entra_ids: set[str] | None = None,
     suspend_when_out_of_scope: bool = True,
     suspend_when_entra_disabled: bool = True,
     protect_zendesk_staff_roles: bool = True,
@@ -212,7 +210,7 @@ def plan_reconciliation(
         )
 
     if suspend_when_out_of_scope:
-        desired_ids = set(desired_users)
+        protected_scope = in_scope_entra_ids if in_scope_entra_ids is not None else set(desired_users)
         for zendesk_user in zendesk_users:
             zendesk_id = int(zendesk_user.get("id"))
             if zendesk_id in matched_zendesk_ids:
@@ -221,7 +219,7 @@ def plan_reconciliation(
             if not external_id.startswith(EXTERNAL_ID_PREFIX):
                 continue
             entra_id = external_id[len(EXTERNAL_ID_PREFIX) :]
-            if not entra_id or entra_id in desired_ids:
+            if not entra_id or entra_id in protected_scope:
                 continue
 
             role = str(zendesk_user.get("role") or "").strip().lower()
