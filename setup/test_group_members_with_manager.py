@@ -4,10 +4,21 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
 from typing import Any
 
-from lib.config import ConfigError, load_config, validate_config
-from lib.graph import GraphError, get_graph_access_token, graph_get_all, load_graph_config
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from lib.config import ConfigError, load_config, validate_config  # noqa: E402
+from lib.graph import (  # noqa: E402
+    GraphError,
+    get_graph_access_token,
+    graph_get_all,
+    load_graph_config,
+)
 
 
 def parse_args() -> argparse.Namespace:
