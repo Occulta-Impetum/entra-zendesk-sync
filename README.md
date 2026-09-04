@@ -29,6 +29,7 @@ entra-zendesk-sync/
 │
 ├── setup/
 │   ├── configure.py
+│   ├── create_certificate.ps1
 │   ├── test_graph_auth.py
 │   └── test_zendesk_auth.py
 │
@@ -70,10 +71,20 @@ Production secrets and machine-specific authentication material must not be comm
 
 Production use will prefer unattended application authentication with an Entra app registration and certificate-based client credentials.
 
+For Windows administrators, `setup/create_certificate.ps1` can create a self-signed RSA certificate, export the public `.cer` file for upload to Entra, and export a password-protected `.pfx` containing the private key for use by the sync runtime.
+
+Run from PowerShell:
+
+```powershell
+.\setup\create_certificate.ps1
+```
+
+The script writes certificate files under `setup/certificates/` by default. Certificate and private-key files are excluded from Git. Upload only the `.cer` file to the Entra app registration. Keep the `.pfx` file and its password private.
+
 ### Zendesk
 
 Zendesk access will use OAuth rather than deprecated Zendesk API tokens.
 
 ## Current status
 
-Repository scaffolding is complete. The first implementation milestone is read-only unattended Microsoft Graph authentication and group discovery.
+Repository scaffolding and the Windows certificate setup helper are complete. The next implementation milestone is read-only unattended Microsoft Graph authentication and group discovery.
