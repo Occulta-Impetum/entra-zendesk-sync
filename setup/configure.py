@@ -85,6 +85,7 @@ class ConfigureApp(tk.Tk):
         self.selected_group_ids: set[str] = set()
         self.group_vars: dict[str, tk.BooleanVar] = {}
         self.mapping_vars: dict[str, tk.StringVar] = {}
+        self.saved_config_path: Path | None = None
 
         self.container = ttk.Frame(self, padding=16)
         self.container.pack(fill="both", expand=True)
@@ -436,6 +437,7 @@ class ConfigureApp(tk.Tk):
 
         self.existing_config = config
         self.existing_mappings = existing_mapping_by_group_id(config)
+        self.saved_config_path = path
         messagebox.showinfo(
             "Configuration saved",
             f"Configuration saved successfully to:\n{path}\n\nNo secrets were written to config.yaml.",
@@ -447,6 +449,11 @@ def main() -> int:
     try:
         app = ConfigureApp()
         app.mainloop()
+        if app.saved_config_path:
+            print("Configuration wizard completed successfully.")
+            print(f"Saved configuration: {app.saved_config_path}")
+        else:
+            print("Configuration wizard closed without saving changes.")
         return 0
     except tk.TclError as exc:
         print(f"ERROR: Unable to start Tkinter configuration GUI: {exc}")
