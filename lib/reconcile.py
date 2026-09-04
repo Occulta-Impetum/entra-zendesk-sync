@@ -264,7 +264,7 @@ def plan_reconciliation(
         existing_external = str(zendesk_user.get("external_id") or "").strip()
         if matched_by == "email" and existing_external and existing_external != external_id:
             allowed_id = resolution.get("zendesk_user_id")
-            allowed_match = allowed_id in (None, "") or str(allowed_id) == str(zendesk_id)
+            allowed_match = allowed_id not in (None, "") and str(allowed_id) == str(zendesk_id)
             if decision == "replace_external_id" and allowed_match:
                 forced_relink = True
             elif decision == "skip":
