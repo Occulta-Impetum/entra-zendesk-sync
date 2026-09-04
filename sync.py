@@ -13,6 +13,7 @@ from collections import Counter
 
 from lib.cache import CacheError, load_zendesk_users_cache, save_zendesk_users_cache
 from lib.config import ConfigError, load_config, validate_config
+from lib.conflicts import ConflictSnapshotError, save_conflicts
 from lib.graph import (
     GraphError,
     get_graph_access_token,
@@ -21,6 +22,7 @@ from lib.graph import (
 )
 from lib.logging_utils import ConsoleLogTee
 from lib.reconcile import build_desired_users, plan_reconciliation, summarize_plan
+from lib.resolutions import ResolutionError, load_resolutions
 from lib.zendesk import ZendeskError, get_access_token, get_users, load_zendesk_config
 
 # Runtime scopes are explicit. ZENDESK_OAUTH_SCOPE remains only a default for
@@ -73,11 +75,13 @@ def _print_summary(counts: Counter[str], total_rows: int) -> None:
     preferred_order = [
         "CREATE",
         "ADOPT",
+        "RELINK",
         "UPDATE EMAIL",
         "UPDATE NAME",
         "UPDATE ORGANIZATION",
         "UNSUSPEND",
         "SUSPEND",
+        "SKIP",
         "PROTECTED",
         "CONFLICT",
         "NO CHANGE",
@@ -132,10 +136,7 @@ def _load_or_refresh_zendesk_users(
         cached = load_zendesk_users_cache(subdomain=subdomain)
         if cached is not None:
             users, metadata = cached
-            print(
-                "      Using local Zendesk user snapshot: "
-                f"{metadata['path']}"
-            )
+            print("      Using local Zendesk user snapshot: " f"{metadata['path']}")
             print(f"      Snapshot fetched at: {metadata['fetched_at']}")
             print(f"      {len(users)} Zendesk user(s) loaded from cache.")
             return users, "cache"
@@ -167,11 +168,13 @@ def _run(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        print("\n[1/6] Loading configuration...", flush=True)
+        print("\n[1/6] Loading configuration and conflict decisions...", flush=True)
         config = load_config()
         validate_config(config)
         mappings = list(config["mappings"])
+        resolutions = load_resolutions()
         print(f"      Configuration valid. {len(mappings)} group mapping(s) loaded.")
+        print(f"      {len(resolutions)} saved conflict decision(s) loaded.")
 
         print("\n[2/6] Authenticating to Microsoft Graph...", flush=True)
         graph_config = load_graph_config()
@@ -192,10 +195,16 @@ def _run(args: argparse.Namespace) -> int:
             print(f"            {len(members)} user member(s) found.")
             group_members.append((mapping, members))
 
-        desired_users, membership_conflicts, in_scope_ids = build_desired_users(group_members)
+        desired_users, membership_conflicts, in_scope_ids = build_desired_users(
+            group_members,
+            resolutions=resolutions,
+        )
+        unresolved_memberships = sum(
+            1 for row in membership_conflicts if row.get("action") == "CONFLICT"
+        )
         print(
             f"      {len(in_scope_ids)} unique Entra user(s) in scope; "
-            f"{len(membership_conflicts)} multiple-group conflict(s)."
+            f"{unresolved_memberships} unresolved multiple-group conflict(s)."
         )
 
         print("\n[4/6] Authenticating to Zendesk with read-only scope...", flush=True)
@@ -224,23 +233,48 @@ def _run(args: argparse.Namespace) -> int:
             suspend_when_out_of_scope=_behavior(config, "suspend_when_out_of_scope", True),
             suspend_when_entra_disabled=_behavior(config, "suspend_when_entra_disabled", True),
             protect_zendesk_staff_roles=_behavior(config, "protect_zendesk_staff_roles", True),
+            resolutions=resolutions,
         )
         plan.extend(membership_conflicts)
         plan.sort(key=lambda row: (str(row.get("action")), str(row.get("name") or "").lower()))
         counts = summarize_plan(plan)
+        unresolved_conflicts = [row for row in plan if row.get("action") == "CONFLICT"]
+        conflict_path = save_conflicts(unresolved_conflicts)
         print("      Reconciliation plan complete.")
+        print(
+            f"      {len(unresolved_conflicts)} unresolved conflict(s) saved to: {conflict_path}"
+        )
 
-    except (CacheError, ConfigError, GraphError, ZendeskError, KeyError, ValueError) as exc:
+    except (
+        CacheError,
+        ConfigError,
+        ConflictSnapshotError,
+        GraphError,
+        ResolutionError,
+        ZendeskError,
+        KeyError,
+        ValueError,
+    ) as exc:
         print(f"\nERROR: {exc}")
         return 1
 
     _print_summary(counts, len(plan))
     _print_details(plan)
 
+    if unresolved_conflicts:
+        print("CONFLICT REVIEW REQUIRED:")
+        print("Run: python .\\setup\\resolve_conflicts.py")
+        print("Then run the dry run again to apply those saved decisions to the plan.")
+        print()
+
     if args.final_dry_run:
         print("FINAL DRY RUN COMPLETE: no Zendesk data was modified.")
-        print("This run refreshed Zendesk from live data and represents the expected next --apply plan.")
-        print("A later --apply run will re-read live state before writing, so any intervening changes will be detected.")
+        if unresolved_conflicts:
+            print("This is NOT ready for --apply because unresolved conflicts remain.")
+        else:
+            print("No unresolved conflicts remain in the current plan.")
+            print("This run refreshed Zendesk from live data and represents the expected next --apply plan.")
+            print("A later --apply run will re-read live state before writing, so intervening changes will be detected.")
     else:
         print("DRY RUN COMPLETE: no Zendesk data was modified.")
         if zendesk_source == "cache":
