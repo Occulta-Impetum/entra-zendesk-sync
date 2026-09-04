@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from lib.cache import diff_entra_users
+from lib.cache import CacheError, diff_entra_users
 from lib.operational import _collision_email, build_incremental_plan
 
 
@@ -28,6 +28,56 @@ class EntraDiffTests(unittest.TestCase):
         self.assertEqual(new_ids, {"new"})
         self.assertEqual(changed_ids, {"changed"})
         self.assertEqual(removed_ids, {"old"})
+
+    @patch("lib.cache._change_guard_settings", return_value=(10, 5.0, 50, 15.0))
+    def test_large_removal_set_trips_safety_guard(self, _settings_mock) -> None:
+        previous = {
+            "current": {
+                f"user-{index}": {"name": f"User {index}"}
+                for index in range(100)
+            },
+            "history": {},
+        }
+        current = {
+            f"user-{index}": {"name": f"User {index}"}
+            for index in range(80)
+        }
+        with self.assertRaises(CacheError) as context:
+            diff_entra_users(current, previous)
+        self.assertIn("ENTRA CHANGE-VOLUME SAFETY STOP", str(context.exception))
+        self.assertIn("20 removals", str(context.exception))
+
+    @patch("lib.cache._change_guard_settings", return_value=(10, 5.0, 50, 15.0))
+    def test_large_non_removal_change_set_also_trips_guard(self, _settings_mock) -> None:
+        previous_current = {
+            f"user-{index}": {"name": f"User {index}", "job_title": "Old"}
+            for index in range(100)
+        }
+        current = dict(previous_current)
+        current = {key: dict(value) for key, value in previous_current.items()}
+        for index in range(51):
+            current[f"user-{index}"]["job_title"] = "New"
+        previous = {"current": previous_current, "history": {}}
+        with self.assertRaises(CacheError) as context:
+            diff_entra_users(current, previous)
+        self.assertIn("51 total changes", str(context.exception))
+
+    @patch("lib.cache._change_guard_settings", return_value=(10, 5.0, 50, 15.0))
+    def test_reasonable_change_set_passes_guard(self, _settings_mock) -> None:
+        previous = {
+            "current": {
+                f"user-{index}": {"name": f"User {index}", "job_title": "Old"}
+                for index in range(100)
+            },
+            "history": {},
+        }
+        current = {key: dict(value) for key, value in previous["current"].items()}
+        current["user-1"]["job_title"] = "New"
+        current.pop("user-99")
+        new_ids, changed_ids, removed_ids = diff_entra_users(current, previous)
+        self.assertEqual(new_ids, set())
+        self.assertEqual(changed_ids, {"user-1"})
+        self.assertEqual(removed_ids, {"user-99"})
 
 
 class CollisionEmailTests(unittest.TestCase):
