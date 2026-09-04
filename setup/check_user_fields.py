@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Inspect Zendesk user fields and an existing user's manager lookup relationship."""
+"""Inspect Zendesk user fields and optionally verify a Manager lookup on one user."""
 
 from __future__ import annotations
 
@@ -19,21 +19,22 @@ from lib.zendesk import (  # noqa: E402
     zendesk_get,
 )
 
-READ_SCOPE = "users:read"
-DEFAULT_EMAIL = "csmith@landersmemphis.com"
+READ_SCOPE = "users:read account_settings:read"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Inspect Zendesk custom user fields and verify how an existing Manager "
+            "Inspect Zendesk custom user fields and optionally verify how a Manager "
             "lookup field stores its relationship to another Zendesk user."
         )
     )
     parser.add_argument(
         "--email",
-        default=DEFAULT_EMAIL,
-        help=f"Zendesk user to inspect (default: {DEFAULT_EMAIL}).",
+        help=(
+            "Optional Zendesk user email to inspect. If omitted, the script only "
+            "reports user-field definitions and Manager lookup metadata."
+        ),
     )
     return parser.parse_args()
 
@@ -138,6 +139,19 @@ def _manager_fields(fields: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _print_field(field: dict[str, Any]) -> None:
+    print(f"Title: {field.get('title') or '-'}")
+    print(f"  Key: {field.get('key') or '-'}")
+    print(f"  ID: {field.get('id') or '-'}")
+    print(f"  Type: {field.get('type') or '-'}")
+    print(f"  Active: {field.get('active')}")
+    if field.get("relationship_target_type"):
+        print(f"  Relationship target: {field.get('relationship_target_type')}")
+    if field.get("relationship_filter"):
+        print(f"  Relationship filter: {field.get('relationship_filter')}")
+    print()
+
+
 def _resolve_lookup_target(
     raw_value: object,
     *,
@@ -164,22 +178,19 @@ def _resolve_lookup_target(
 def main() -> int:
     args = parse_args()
     email = str(args.email or "").strip()
-    if not email:
-        print("ERROR: --email cannot be empty.")
-        return 2
 
     try:
         print("Zendesk User Field / Manager Lookup Check")
         print("========================================")
 
-        print("\n[1/4] Authenticating to Zendesk with read-only user scope...", flush=True)
+        print("\n[1] Authenticating to Zendesk with required read-only scopes...", flush=True)
         config = load_zendesk_config()
         print(f"      Requested scope: {READ_SCOPE}")
         token, token_data = get_access_token(config, scope=READ_SCOPE)
         granted = token_data.get("scope") or token_data.get("scopes") or "not reported"
         print(f"      Zendesk authentication successful. Granted scope: {granted}")
 
-        print("\n[2/4] Reading Zendesk custom user-field definitions...", flush=True)
+        print("\n[2] Reading Zendesk custom user-field definitions...", flush=True)
         fields = _list_user_fields(access_token=token, subdomain=config["subdomain"])
         relevant = _find_relevant_fields(fields)
         print(f"      {len(fields)} total custom user field(s) found.")
@@ -189,20 +200,28 @@ def main() -> int:
             print("\nRelevant Zendesk user fields")
             print("----------------------------")
             for field in relevant:
-                print(f"Title: {field.get('title') or '-'}")
-                print(f"  Key: {field.get('key') or '-'}")
-                print(f"  ID: {field.get('id') or '-'}")
-                print(f"  Type: {field.get('type') or '-'}")
-                print(f"  Active: {field.get('active')}")
-                if field.get("relationship_target_type"):
-                    print(f"  Relationship target: {field.get('relationship_target_type')}")
-                if field.get("relationship_filter"):
-                    print(f"  Relationship filter: {field.get('relationship_filter')}")
-                print()
+                _print_field(field)
         else:
             print("      No likely Employee ID, Title, or Manager fields were found by title/key.")
 
-        print(f"\n[3/4] Inspecting {email}...", flush=True)
+        managers = _manager_fields(fields)
+        if managers:
+            print("Manager field schema")
+            print("--------------------")
+            for field in managers:
+                _print_field(field)
+        else:
+            print("No Zendesk user field with 'manager' in its title/key was found.")
+
+        if not email:
+            print(
+                "No --email was supplied, so no individual Zendesk user was inspected.\n"
+                "To verify a populated Manager relationship, rerun with:\n"
+                "  python .\\setup\\check_user_fields.py --email user@example.com"
+            )
+            return 0
+
+        print(f"[3] Inspecting {email}...", flush=True)
         user = _search_exact_user(
             email,
             access_token=token,
@@ -216,10 +235,9 @@ def main() -> int:
         if not isinstance(user_fields, dict):
             user_fields = {}
 
-        print("\n[4/4] Checking Manager lookup relationship...", flush=True)
-        managers = _manager_fields(fields)
+        print("\n[4] Checking Manager lookup relationship...", flush=True)
         if not managers:
-            print("      No Zendesk user field with 'manager' in its title/key was found.")
+            print("      No Manager field was available to inspect.")
             return 1
 
         found_lookup = False
@@ -246,7 +264,7 @@ def main() -> int:
                     )
                     print(
                         "      Result: this Manager field is a Zendesk user lookup relationship. "
-                        "The stored value is the target Zendesk user ID."
+                        "The stored value resolves to the target Zendesk user."
                     )
                 elif raw_value in (None, ""):
                     print("      Manager is currently blank on this user.")
@@ -261,13 +279,9 @@ def main() -> int:
             print("Recommended sync behavior")
             print("-------------------------")
             print(
-                "Manager should be synchronized as a Zendesk lookup relationship, not as text. "
-                "Zendesk accepts a target user ID, or a lookup expression such as "
-                "email:manager@example.com when setting a user lookup field."
-            )
-            print(
-                "For bootstrap, manager relationships should be written in a second pass after "
-                "all users have been created/adopted so every manager target exists in Zendesk first."
+                "Manager should be synchronized as a Zendesk user lookup relationship, not as text. "
+                "Bootstrap manager relationships should be written in a second pass after all users "
+                "have been created/adopted so every manager target exists first."
             )
             return 0
 
