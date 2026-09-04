@@ -304,12 +304,22 @@ class ConfigureApp(tk.Tk):
 
         header = ttk.Frame(self.container)
         header.pack(fill="x", padx=(8, 24), pady=(0, 4))
-        ttk.Label(header, text="Entra security group", font=("Segoe UI", 10, "bold")).pack(
-            side="left", fill="x", expand=True
-        )
-        ttk.Label(header, text="Zendesk organization", font=("Segoe UI", 10, "bold")).pack(
-            side="right", ipadx=90
-        )
+        header.columnconfigure(0, weight=1, uniform="mapping")
+        header.columnconfigure(1, weight=0)
+        header.columnconfigure(2, weight=1, uniform="mapping")
+        ttk.Label(
+            header,
+            text="Entra security group",
+            font=("Segoe UI", 10, "bold"),
+            anchor="e",
+        ).grid(row=0, column=0, sticky="e", padx=(0, 12))
+        ttk.Separator(header, orient="vertical").grid(row=0, column=1, sticky="ns")
+        ttk.Label(
+            header,
+            text="Zendesk organization",
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        ).grid(row=0, column=2, sticky="w", padx=(12, 0))
 
         scroll = ScrollableFrame(self.container)
         scroll.pack(fill="both", expand=True, pady=(0, 10))
@@ -329,9 +339,16 @@ class ConfigureApp(tk.Tk):
             group_id = str(group.get("id"))
             row = ttk.Frame(scroll.inner, padding=(6, 5))
             row.pack(fill="x")
-            ttk.Label(row, text=str(group.get("displayName") or "(unnamed group)"), width=42).pack(
-                side="left", fill="x", expand=True
-            )
+            row.columnconfigure(0, weight=1, uniform="mapping")
+            row.columnconfigure(1, weight=0)
+            row.columnconfigure(2, weight=1, uniform="mapping")
+
+            ttk.Label(
+                row,
+                text=str(group.get("displayName") or "(unnamed group)"),
+                anchor="e",
+            ).grid(row=0, column=0, sticky="e", padx=(0, 12))
+            ttk.Separator(row, orient="vertical").grid(row=0, column=1, sticky="ns")
 
             var = self.mapping_vars.get(group_id)
             if var is None:
@@ -353,7 +370,7 @@ class ConfigureApp(tk.Tk):
                 state="readonly",
                 width=38,
             )
-            combo.pack(side="right", padx=(12, 0))
+            combo.grid(row=0, column=2, sticky="w", padx=(12, 0))
 
         buttons = ttk.Frame(self.container)
         buttons.pack(fill="x")
@@ -423,6 +440,7 @@ class ConfigureApp(tk.Tk):
             "Configuration saved",
             f"Configuration saved successfully to:\n{path}\n\nNo secrets were written to config.yaml.",
         )
+        self.destroy()
 
 
 def main() -> int:
