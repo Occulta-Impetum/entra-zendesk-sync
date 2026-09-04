@@ -185,6 +185,7 @@ def get_security_groups(access_token: str) -> list[dict[str, Any]]:
 
 
 def get_group_user_members(access_token: str, group_id: str) -> list[dict[str, Any]]:
+    """Return direct user members with their manager relationship expanded inline."""
     return graph_get_all(
         f"/groups/{group_id}/members/microsoft.graph.user",
         access_token=access_token,
@@ -193,9 +194,10 @@ def get_group_user_members(access_token: str, group_id: str) -> list[dict[str, A
                 "id,displayName,userPrincipalName,mail,accountEnabled,companyName,officeLocation,"
                 "employeeId,jobTitle"
             ),
+            "$expand": "manager($select=id,displayName,mail,userPrincipalName)",
             "$top": "100",
         },
-        progress_label="group members",
+        progress_label="group members with manager",
     )
 
 
@@ -203,7 +205,11 @@ def get_user_managers(
     access_token: str,
     user_ids: list[str] | set[str],
 ) -> dict[str, dict[str, Any] | None]:
-    """Resolve managers for many users using Microsoft Graph JSON batching."""
+    """Fallback helper: resolve managers for many users using Graph JSON batching.
+
+    Normal group-member discovery now expands manager inline and should not need
+    this helper. It is retained temporarily for compatibility and diagnostics.
+    """
     ordered_ids = sorted({str(user_id).strip() for user_id in user_ids if str(user_id).strip()})
     result: dict[str, dict[str, Any] | None] = {user_id: None for user_id in ordered_ids}
     total_batches = (len(ordered_ids) + BATCH_SIZE - 1) // BATCH_SIZE
