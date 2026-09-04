@@ -30,3 +30,12 @@ behavior:
   ambiguous_group_membership: conflict
   protect_zendesk_staff_roles: true
   dry_run_by_default: true
+
+  # Scheduled-run safety guard. If a fresh Entra snapshot changes too much from
+  # the last successful snapshot, the run stops before Zendesk is touched and
+  # the Entra cache is not advanced. The lower of the absolute/percentage
+  # thresholds effectively wins.
+  max_removed_users_per_run: 10
+  max_removed_percent_per_run: 5.0
+  max_changed_users_per_run: 50
+  max_changed_percent_per_run: 15.0
