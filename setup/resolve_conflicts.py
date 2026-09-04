@@ -81,7 +81,7 @@ class ConflictResolver(tk.Tk):
         ).pack(anchor="w")
         ttk.Label(
             self.container,
-            text=f"Conflict {self.index + 1} of {len(self.conflicts)}",
+            text=f"Conflict {self.index + 1} of {len(self.conflicts)} | Type: {conflict_type}",
             foreground="#555555",
         ).pack(anchor="w", pady=(2, 10))
 
@@ -93,9 +93,7 @@ class ConflictResolver(tk.Tk):
                 "During initial adoption, an email match may point to a Zendesk user that belonged to "
                 "someone else if your organization reuses email addresses. Choosing to adopt/relink that "
                 "Zendesk user keeps its existing ticket history. After a user is linked with the immutable "
-                "Entra object ID, future syncs match that external ID first. A different Entra user later "
-                "reusing the same email will be raised as a conflict instead of silently taking over the "
-                "linked Zendesk user."
+                "Entra object ID, future syncs match that external ID first."
             ),
             wraplength=820,
         ).pack(anchor="w")
@@ -128,18 +126,18 @@ class ConflictResolver(tk.Tk):
         current = self.resolutions.get(str(conflict.get("entra_id") or ""), {})
         selected = self.reverse_decision_map.get(self._resolution_key(current), LEAVE_UNRESOLVED)
         self.decision_var.set(selected)
-        combo = ttk.Combobox(
+        ttk.Combobox(
             decision_frame,
             textvariable=self.decision_var,
             values=[label for label, _value in choices],
             state="readonly",
-        )
-        combo.pack(fill="x")
+        ).pack(fill="x")
 
         buttons = ttk.Frame(self.container)
         buttons.pack(fill="x")
         ttk.Button(buttons, text="< Previous", command=self._previous).pack(side="left")
         ttk.Button(buttons, text="Next >", command=self._next).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Next Type >>", command=self._next_type).pack(side="left", padx=(8, 0))
         ttk.Button(
             buttons,
             text="Apply This Decision to All Same-Type Conflicts",
@@ -205,23 +203,15 @@ class ConflictResolver(tk.Tk):
                 )
                 choices.insert(
                     len(choices) - 1,
-                    {"label": label, "value": {"decision": "use_zendesk_user", "zendesk_user_id": candidate.get("id")}},
+                    (label, {"decision": "use_zendesk_user", "zendesk_user_id": candidate.get("id")}),
                 )
-            choices = [
-                (item["label"], item["value"]) if isinstance(item, dict) else item
-                for item in choices
-            ]
         elif conflict_type == "multiple_groups":
             for group in conflict.get("group_candidates") or []:
                 label = f"Use {group.get('group_name')} -> {group.get('zendesk_org_name')}"
                 choices.insert(
                     len(choices) - 1,
-                    {"label": label, "value": {"decision": "use_group", "group_id": group.get("group_id")}},
+                    (label, {"decision": "use_group", "group_id": group.get("group_id")}),
                 )
-            choices = [
-                (item["label"], item["value"]) if isinstance(item, dict) else item
-                for item in choices
-            ]
 
         return choices
 
@@ -258,6 +248,25 @@ class ConflictResolver(tk.Tk):
             self.index += 1
         self._show_conflict()
 
+    def _find_next_type_index(self) -> int | None:
+        if not self.conflicts:
+            return None
+        current_type = str(self.conflicts[self.index].get("conflict_type") or "")
+        for candidate_index in range(self.index + 1, len(self.conflicts)):
+            candidate_type = str(self.conflicts[candidate_index].get("conflict_type") or "")
+            if candidate_type != current_type:
+                return candidate_index
+        return None
+
+    def _next_type(self) -> None:
+        self._store_current()
+        next_index = self._find_next_type_index()
+        if next_index is None:
+            messagebox.showinfo("No next conflict type", "There are no later conflicts of a different type.")
+            return
+        self.index = next_index
+        self._show_conflict()
+
     def _apply_to_same_type(self) -> None:
         self._store_current()
         current = self.conflicts[self.index]
@@ -288,8 +297,15 @@ class ConflictResolver(tk.Tk):
                 candidates = item.get("zendesk_candidates") or []
                 copied["zendesk_user_id"] = candidates[0].get("id") if candidates else item.get("zendesk_id")
             self.resolutions[entra_id] = copied
+
+        next_index = self._find_next_type_index()
         messagebox.showinfo("Bulk decision applied", f"Updated {len(matching)} saved decision(s).")
-        self._show_conflict()
+        if next_index is not None:
+            self.index = next_index
+            self._show_conflict()
+        else:
+            messagebox.showinfo("No next conflict type", "All later conflicts are the same type or there are no more conflicts.")
+            self._show_conflict()
 
     def _save_and_close(self) -> None:
         self._store_current()
