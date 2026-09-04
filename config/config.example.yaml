@@ -1,18 +1,27 @@
 # Example non-secret configuration for Entra -> Zendesk Sync.
-# Copy to config/config.yaml after running the setup wizard.
+# The graphical setup wizard writes config/config.yaml in this format.
+
+version: 1
 
 entra:
   tenant_id: "00000000-0000-0000-0000-000000000000"
   client_id: "00000000-0000-0000-0000-000000000000"
-  selected_groups:
-    - group_id: "00000000-0000-0000-0000-000000000000"
-      zendesk_org_id: 123456789
 
 zendesk:
   subdomain: "example"
   default_role: "end-user"
 
+mappings:
+  - entra_group:
+      id: "00000000-0000-0000-0000-000000000000"
+      name: "Example Zendesk Users"
+    zendesk_organization:
+      id: 123456789
+      name: "Example Organization"
+
 behavior:
   suspend_when_out_of_scope: true
-  conflict_on_multiple_mapped_groups: true
+  suspend_when_entra_disabled: true
+  ambiguous_group_membership: conflict
+  protect_zendesk_staff_roles: true
   dry_run_by_default: true
