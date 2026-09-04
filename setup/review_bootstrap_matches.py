@@ -148,6 +148,7 @@ class BootstrapReviewApp(tk.Tk):
         buttons.pack(fill="x")
         ttk.Button(buttons, text="< Previous", command=self._previous).pack(side="left")
         ttk.Button(buttons, text="Next >", command=self._next).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Next Type >>", command=self._next_type).pack(side="left", padx=(8, 0))
         ttk.Button(
             buttons,
             text="Apply This Decision to All Same-Type Reviews",
@@ -188,6 +189,37 @@ class BootstrapReviewApp(tk.Tk):
             self.index += 1
         self._show_review()
 
+    def _find_next_type_index(self) -> int | None:
+        if not self.reviews:
+            return None
+        current_type = str(self.reviews[self.index].get("review_type") or "")
+
+        # Prefer the next different review type later in the list.
+        for candidate_index in range(self.index + 1, len(self.reviews)):
+            candidate_type = str(self.reviews[candidate_index].get("review_type") or "")
+            if candidate_type != current_type:
+                return candidate_index
+
+        # If needed, wrap around so the button remains useful from the end.
+        for candidate_index in range(0, self.index):
+            candidate_type = str(self.reviews[candidate_index].get("review_type") or "")
+            if candidate_type != current_type:
+                return candidate_index
+
+        return None
+
+    def _next_type(self) -> None:
+        self._store_current()
+        next_index = self._find_next_type_index()
+        if next_index is None:
+            messagebox.showinfo(
+                "No other review type",
+                "There are no reviews of a different type in the current review set.",
+            )
+            return
+        self.index = next_index
+        self._show_review()
+
     def _apply_to_same_type(self) -> None:
         self._store_current()
         current = self.reviews[self.index]
@@ -205,7 +237,21 @@ class BootstrapReviewApp(tk.Tk):
             return
         for item in matching:
             self.decisions[str(item.get("entra_id") or "")] = dict(decision)
-        messagebox.showinfo("Bulk decision applied", f"Updated {len(matching)} saved decision(s).")
+
+        next_index = self._find_next_type_index()
+        if next_index is None:
+            messagebox.showinfo(
+                "Bulk decision applied",
+                f"Updated {len(matching)} saved decision(s). There are no other review types in this set.",
+            )
+            self._show_review()
+            return
+
+        messagebox.showinfo(
+            "Bulk decision applied",
+            f"Updated {len(matching)} saved decision(s). Moving to the next review type.",
+        )
+        self.index = next_index
         self._show_review()
 
     def _save_and_close(self) -> None:
