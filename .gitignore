@@ -21,6 +21,7 @@ config/config.yaml
 *.pfx
 *.p12
 *.key
+*.cer
 certs/
 
 # Logs and generated output
