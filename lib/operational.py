@@ -12,7 +12,7 @@ import re
 from collections import Counter
 from typing import Any
 
-from lib.cache import CacheError, diff_entra_users, load_entra_users_cache
+from lib.cache import CacheError, diff_entra_users, load_entra_users_cache, save_entra_users_cache
 from lib.config import ConfigError, load_config, validate_config
 from lib.graph import GraphError, get_graph_access_token, get_group_user_members, get_user_managers, load_graph_config
 from lib.reconcile import EXTERNAL_ID_PREFIX, build_desired_users
@@ -102,6 +102,30 @@ def collect_current_entra_state() -> tuple[dict[str, Any], dict[str, dict[str, A
     managers = get_user_managers(graph_token, set(desired))
     current = _normalize_current(desired, managers)
     return config, current, membership_rows
+
+
+def initialize_entra_baseline() -> int:
+    """Seed the local Entra baseline without reading or changing Zendesk.
+
+    This exists primarily for upgrades from pre-incremental bootstrap versions.
+    New successful bootstrap applies seed the baseline automatically.
+    """
+    print("Entra -> Zendesk Sync (INITIALIZE ENTRA BASELINE)")
+    print("===============================================")
+    try:
+        _config, current, membership_rows = collect_current_entra_state()
+        conflicts = [row for row in membership_rows if row.get("action") == "CONFLICT"]
+        if conflicts:
+            print(f"\nERROR: refusing to initialize baseline because {len(conflicts)} Entra membership conflict(s) remain.")
+            return 1
+        previous = load_entra_users_cache()
+        path = save_entra_users_cache(current, previous=previous)
+        print(f"\nSaved authoritative Entra baseline for {len(current)} user(s): {path}")
+        print("No Zendesk API call was made and no Zendesk data was modified.")
+        return 0
+    except (OperationalError, CacheError, ConfigError, GraphError, ResolutionError, KeyError, ValueError) as exc:
+        print(f"\nERROR: {exc}")
+        return 1
 
 
 def _changed_fields(old: dict[str, Any] | None, new: dict[str, Any]) -> set[str]:
@@ -199,7 +223,18 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
                 continue
 
             owner = email_matches[0]
-            old_external = str(owner.get("external_id") or "").strip()
+            owner_full = get_user(token, zendesk_config["subdomain"], int(owner["id"]))
+            owner_role = str(owner_full.get("role") or "").lower()
+            if owner_role in {"admin", "agent"}:
+                plan.append({
+                    **record,
+                    "action": "PROTECTED",
+                    "zendesk_id": int(owner_full["id"]),
+                    "reason": f"Desired email belongs to Zendesk {owner_role}; staff roles are protected from operational identity changes.",
+                })
+                continue
+
+            old_external = str(owner_full.get("external_id") or "").strip()
             old_entra_id = old_external[len(EXTERNAL_ID_PREFIX):] if old_external.lower().startswith(EXTERNAL_ID_PREFIX) else ""
             old_record = _history_record(previous_cache, old_entra_id) if old_entra_id else None
             if (
@@ -218,7 +253,7 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
                     **record,
                     "action": "EMAIL REUSE + CREATE",
                     "reason": "Desired email belongs to a previously managed Entra identity that is no longer present.",
-                    "old_zendesk_id": int(owner["id"]),
+                    "old_zendesk_id": int(owner_full["id"]),
                     "old_entra_id": old_entra_id,
                     "old_employee_id": str(old_record["employee_id"]),
                     "rename_old_email_to": historical_email,
@@ -230,7 +265,7 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
                 **record,
                 "action": "CONFLICT",
                 "reason": "Desired email is already owned by a Zendesk identity that cannot be proven to be a retired Entra user.",
-                "zendesk_id": int(owner["id"]),
+                "zendesk_id": int(owner_full["id"]),
                 "zendesk_external_id": old_external,
             })
             continue
