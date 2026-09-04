@@ -32,16 +32,10 @@ class EntraDiffTests(unittest.TestCase):
     @patch("lib.cache._change_guard_settings", return_value=(10, 5.0, 50, 15.0))
     def test_large_removal_set_trips_safety_guard(self, _settings_mock) -> None:
         previous = {
-            "current": {
-                f"user-{index}": {"name": f"User {index}"}
-                for index in range(100)
-            },
+            "current": {f"user-{index}": {"name": f"User {index}"} for index in range(100)},
             "history": {},
         }
-        current = {
-            f"user-{index}": {"name": f"User {index}"}
-            for index in range(80)
-        }
+        current = {f"user-{index}": {"name": f"User {index}"} for index in range(80)}
         with self.assertRaises(CacheError) as context:
             diff_entra_users(current, previous)
         self.assertIn("ENTRA CHANGE-VOLUME SAFETY STOP", str(context.exception))
@@ -53,7 +47,6 @@ class EntraDiffTests(unittest.TestCase):
             f"user-{index}": {"name": f"User {index}", "job_title": "Old"}
             for index in range(100)
         }
-        current = dict(previous_current)
         current = {key: dict(value) for key, value in previous_current.items()}
         for index in range(51):
             current[f"user-{index}"]["job_title"] = "New"
@@ -151,15 +144,23 @@ class IncrementalEmailReusePlanTests(unittest.TestCase):
             [{"id": 50, "email": "jsmith@company.com", "external_id": "entra:old-id"}],
             [],
         ]
+        get_user_mock.return_value = {
+            "id": 50,
+            "email": "jsmith@company.com",
+            "external_id": "entra:old-id",
+            "role": "end-user",
+            "suspended": True,
+        }
 
         plan, _, _ = build_incremental_plan()
         self.assertEqual(len(plan), 1)
         self.assertEqual(plan[0]["action"], "EMAIL REUSE + CREATE")
         self.assertEqual(plan[0]["rename_old_email_to"], "jsmith123456@company.com")
         self.assertEqual(plan[0]["old_zendesk_id"], 50)
-        get_user_mock.assert_not_called()
+        get_user_mock.assert_called_once_with("token", "example", 50)
 
     @patch("lib.operational.load_entra_users_cache")
+    @patch("lib.operational.get_user")
     @patch("lib.operational.find_users_by_email")
     @patch("lib.operational.find_users_by_external_id")
     @patch("lib.operational.get_access_token")
@@ -172,6 +173,7 @@ class IncrementalEmailReusePlanTests(unittest.TestCase):
         token_mock,
         external_mock,
         email_mock,
+        get_user_mock,
         cache_mock,
     ) -> None:
         config = {"zendesk": {"user_fields": {"employee_id": "employee_id", "job_title": "standard::job_title", "manager": "standard::manager"}}}
@@ -189,6 +191,13 @@ class IncrementalEmailReusePlanTests(unittest.TestCase):
         token_mock.return_value = ("token", {"scope": "users:read"})
         external_mock.return_value = []
         email_mock.return_value = [{"id": 50, "email": "jsmith@company.com", "external_id": "entra:old-id"}]
+        get_user_mock.return_value = {
+            "id": 50,
+            "email": "jsmith@company.com",
+            "external_id": "entra:old-id",
+            "role": "end-user",
+            "suspended": True,
+        }
 
         plan, _, _ = build_incremental_plan()
         self.assertEqual(plan[0]["action"], "CONFLICT")
