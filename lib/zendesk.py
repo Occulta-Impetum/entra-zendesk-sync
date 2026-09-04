@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
+import time
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -10,6 +13,9 @@ from dotenv import load_dotenv
 
 DEFAULT_SCOPE = "organizations:read"
 REQUEST_TIMEOUT = 30
+TOKEN_EXPIRY_MARGIN_SECONDS = 60
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TOKEN_CACHE_PATH = REPO_ROOT / "cache" / "zendesk_oauth_tokens.json"
 
 
 class ZendeskError(RuntimeError):
@@ -75,27 +81,165 @@ def _safe_error_detail(response: requests.Response, secret: str = "") -> str:
     return " ".join(detail.split())[:750]
 
 
+def _normalize_scope(scope: str) -> str:
+    """Normalize an OAuth scope string so equivalent scope sets share one cache entry."""
+    return " ".join(sorted({part for part in scope.split() if part}))
+
+
+def _token_cache_key(config: dict[str, str], normalized_scope: str) -> str:
+    """Return a stable non-secret key for one tenant/client/exact scope set."""
+    return f"{config['subdomain'].lower()}|{config['client_id']}|{normalized_scope}"
+
+
+def _load_token_cache() -> dict[str, Any]:
+    """Load the local OAuth cache; a corrupt cache is ignored safely."""
+    try:
+        with TOKEN_CACHE_PATH.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return {"version": 1, "entries": {}}
+    except (OSError, ValueError, TypeError):
+        return {"version": 1, "entries": {}}
+
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), dict):
+        return {"version": 1, "entries": {}}
+    return data
+
+
+def _save_token_cache(cache: dict[str, Any]) -> None:
+    """Atomically save cached OAuth tokens under the already-gitignored cache folder."""
+    try:
+        TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = TOKEN_CACHE_PATH.with_suffix(TOKEN_CACHE_PATH.suffix + ".tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(cache, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.replace(temp_path, TOKEN_CACHE_PATH)
+    except OSError as exc:
+        # A cache failure must not prevent authentication. The caller can still
+        # use the newly issued in-memory token for this run.
+        print(f"      WARNING: Unable to save Zendesk OAuth token cache: {exc}")
+
+
+def _get_cached_token(
+    config: dict[str, str],
+    normalized_scope: str,
+) -> tuple[str, dict[str, Any]] | None:
+    """Return a still-valid token for the exact requested scope set, if available."""
+    cache = _load_token_cache()
+    key = _token_cache_key(config, normalized_scope)
+    entry = cache.get("entries", {}).get(key)
+    if not isinstance(entry, dict):
+        return None
+
+    token = str(entry.get("access_token") or "")
+    try:
+        expires_at = float(entry.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        return None
+
+    now = time.time()
+    if not token or expires_at <= now + TOKEN_EXPIRY_MARGIN_SECONDS:
+        return None
+
+    seconds_left = max(0, int(expires_at - now))
+    print(
+        "      Reusing cached Zendesk OAuth token "
+        f"for exact scopes [{normalized_scope}] (~{seconds_left // 60} min remaining)."
+    )
+    token_data = {
+        "access_token": token,
+        "token_type": entry.get("token_type") or "bearer",
+        "expires_in": seconds_left,
+        "scope": entry.get("scope") or normalized_scope,
+        "cached": True,
+    }
+    return token, token_data
+
+
+def _cache_token(
+    *,
+    config: dict[str, str],
+    normalized_scope: str,
+    token: str,
+    token_data: dict[str, Any],
+) -> None:
+    """Cache an expiring client-credentials token for reuse across script runs."""
+    try:
+        expires_in = int(token_data.get("expires_in") or 0)
+    except (TypeError, ValueError):
+        expires_in = 0
+
+    if expires_in <= TOKEN_EXPIRY_MARGIN_SECONDS:
+        print(
+            "      Zendesk OAuth response did not provide a reusable expiration window; "
+            "this token will be used only for the current process."
+        )
+        return
+
+    cache = _load_token_cache()
+    entries = cache.setdefault("entries", {})
+    if not isinstance(entries, dict):
+        entries = {}
+        cache["entries"] = entries
+
+    key = _token_cache_key(config, normalized_scope)
+    granted_scope = _normalize_scope(str(token_data.get("scope") or normalized_scope))
+    entries[key] = {
+        "access_token": token,
+        "expires_at": time.time() + expires_in,
+        "scope": granted_scope,
+        "token_type": str(token_data.get("token_type") or "bearer"),
+        "subdomain": config["subdomain"],
+        "client_id": config["client_id"],
+    }
+    cache["version"] = 1
+    _save_token_cache(cache)
+    print(
+        "      Cached new Zendesk OAuth token "
+        f"for exact scopes [{normalized_scope}] (expires in ~{expires_in // 60} min)."
+    )
+
+
 def get_access_token(
     config: dict[str, str] | None = None,
     *,
     scope: str | None = None,
+    force_new: bool = False,
 ) -> tuple[str, dict[str, Any]]:
-    """Request a short-lived Zendesk OAuth token using client credentials.
+    """Return a Zendesk client-credentials access token.
 
-    ``ZENDESK_OAUTH_SCOPE`` is only the default. Callers can pass an explicit
-    scope so read-only runs never request write permissions.
+    Tokens are cached locally and reused until shortly before expiration. Cache
+    entries are keyed by tenant, OAuth client, and the *exact* requested scope
+    set so a broader token is never silently substituted for a least-privilege
+    request. Client-credentials tokens have no refresh token; once a cached
+    token expires, this function repeats the client-credentials request.
+
+    ``ZENDESK_OAUTH_SCOPE`` is only the default. Callers should pass an explicit
+    scope whenever practical so read-only runs never request write permissions.
     """
     config = config or load_zendesk_config()
     requested_scope = (scope or config["scope"]).strip()
-    if not requested_scope:
+    normalized_scope = _normalize_scope(requested_scope)
+    if not normalized_scope:
         raise ZendeskError("Zendesk OAuth scope cannot be empty.")
 
+    if not force_new:
+        cached = _get_cached_token(config, normalized_scope)
+        if cached is not None:
+            return cached
+
+    print(
+        "      Requesting a new Zendesk OAuth token "
+        f"for exact scopes [{normalized_scope}]...",
+        flush=True,
+    )
     url = f"https://{config['subdomain']}.zendesk.com/oauth/tokens"
     payload = {
         "grant_type": "client_credentials",
         "client_id": config["client_id"],
         "client_secret": config["client_secret"],
-        "scope": requested_scope,
+        "scope": normalized_scope,
     }
 
     try:
@@ -121,10 +265,22 @@ def get_access_token(
     except ValueError as exc:
         raise ZendeskError("Zendesk returned an invalid OAuth response.") from exc
 
+    if not isinstance(data, dict):
+        raise ZendeskError("Zendesk returned an invalid OAuth response object.")
+
     token = data.get("access_token")
     if not token:
         raise ZendeskError("Zendesk OAuth response did not contain an access token.")
 
+    # Preserve an explicit scope value for callers/logging even if Zendesk omits
+    # it from an otherwise valid response.
+    data.setdefault("scope", normalized_scope)
+    _cache_token(
+        config=config,
+        normalized_scope=normalized_scope,
+        token=str(token),
+        token_data=data,
+    )
     return str(token), data
 
 
