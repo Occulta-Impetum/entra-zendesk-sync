@@ -278,14 +278,30 @@ def _write_row(
     return "SKIPPED"
 
 
+def _expected_link_ids(plan: list[dict[str, Any]]) -> set[str]:
+    """Return Entra ids that should be linked after this bootstrap pass.
+
+    Protected email-only staff and deliberately skipped/no-existing disabled users
+    are not expected to receive a new external_id during bootstrap.
+    """
+    expected: set[str] = set()
+    for row in plan:
+        entra_id = str(row.get("entra_id") or "").strip()
+        if not entra_id:
+            continue
+        actions = _action_parts(row)
+        if actions & {"CREATE", "ADOPT", "RELINK"} or row.get("matched_by") == "external_id":
+            expected.add(entra_id)
+    return expected
+
+
 def _verify_after_apply(
     *,
-    config: dict[str, Any],
-    in_scope_ids: set[str],
+    expected_link_ids: set[str],
     access_token: str,
     subdomain: str,
 ) -> tuple[int, int]:
-    """Refresh live Zendesk and verify every in-scope Entra id now resolves by external_id."""
+    """Refresh live Zendesk and verify all expected Entra links now exist."""
     print("\nPost-apply verification: refreshing Zendesk users...", flush=True)
     users = get_users(access_token, subdomain)
     save_zendesk_users_cache(users, subdomain=subdomain)
@@ -296,14 +312,14 @@ def _verify_after_apply(
     }
     missing = [
         entra_id
-        for entra_id in sorted(in_scope_ids)
+        for entra_id in sorted(expected_link_ids)
         if f"{EXTERNAL_ID_PREFIX}{entra_id}".lower() not in external_ids
     ]
     if missing:
-        print(f"      WARNING: {len(missing)} in-scope Entra user(s) still lack their expected external_id.")
+        print(f"      WARNING: {len(missing)} expected Entra link(s) are still missing.")
     else:
-        print(f"      Verified external_id linkage for all {len(in_scope_ids)} in-scope Entra user(s).")
-    return len(in_scope_ids), len(missing)
+        print(f"      Verified external_id linkage for all {len(expected_link_ids)} expected user(s).")
+    return len(expected_link_ids), len(missing)
 
 
 def run_bootstrap_apply() -> int:
@@ -313,9 +329,9 @@ def run_bootstrap_apply() -> int:
 
     try:
         (
-            config,
+            _config,
             plan,
-            in_scope_ids,
+            _in_scope_ids,
             zendesk_config,
             zendesk_token,
             unresolved_conflicts,
@@ -324,6 +340,7 @@ def run_bootstrap_apply() -> int:
 
         _validate_apply_plan(plan, unresolved_conflicts, unresolved_reviews)
         counts = summarize_plan(plan)
+        expected_link_ids = _expected_link_ids(plan)
         if not _confirm_apply(counts, len(plan)):
             print("\nBootstrap apply cancelled. No Zendesk data was modified.")
             return 2
@@ -365,21 +382,21 @@ def run_bootstrap_apply() -> int:
         print(f"      Updated: {updated}")
         print(f"      No-write/protected/skipped rows: {skipped}")
 
-        total_in_scope, missing_links = _verify_after_apply(
-            config=config,
-            in_scope_ids=in_scope_ids,
+        total_expected, missing_links = _verify_after_apply(
+            expected_link_ids=expected_link_ids,
             access_token=zendesk_token,
             subdomain=zendesk_config["subdomain"],
         )
         if missing_links:
             print(
                 "\nBOOTSTRAP APPLY FINISHED WITH VERIFICATION WARNINGS. "
-                f"{missing_links} of {total_in_scope} in-scope Entra users are not linked by external_id."
+                f"{missing_links} of {total_expected} expected Entra links are missing."
             )
             return 1
 
         print("\nBOOTSTRAP APPLY COMPLETE.")
-        print("All in-scope Entra users are now linked by immutable entra:<object-id> external IDs.")
+        print("All expected bootstrap identities are now linked by immutable entra:<object-id> external IDs.")
+        print("Protected/skipped users were intentionally excluded from linkage verification.")
         print("The next validation step is the operational root sync.py, which does not match identities by email.")
         return 0
 
