@@ -14,7 +14,7 @@ from typing import Any
 
 from lib.cache import CacheError, diff_entra_users, load_entra_users_cache, save_entra_users_cache
 from lib.config import ConfigError, load_config, validate_config
-from lib.graph import GraphError, get_graph_access_token, get_group_user_members, get_user_managers, load_graph_config
+from lib.graph import GraphError, get_graph_access_token, get_group_user_members, load_graph_config
 from lib.reconcile import EXTERNAL_ID_PREFIX, build_desired_users
 from lib.resolutions import ResolutionError, load_resolutions
 from lib.zendesk import (
@@ -51,11 +51,9 @@ def _field_keys(config: dict[str, Any]) -> dict[str, str]:
 
 def _normalize_current(
     desired_users: dict[str, dict[str, Any]],
-    managers: dict[str, dict[str, Any] | None],
 ) -> dict[str, dict[str, Any]]:
     current: dict[str, dict[str, Any]] = {}
     for entra_id, desired in desired_users.items():
-        manager = managers.get(entra_id) or {}
         current[entra_id] = {
             "entra_id": entra_id,
             "name": str(desired.get("name") or "").strip(),
@@ -63,9 +61,9 @@ def _normalize_current(
             "enabled": bool(desired.get("enabled")),
             "employee_id": str(desired.get("employee_id") or "").strip(),
             "job_title": str(desired.get("job_title") or "").strip(),
-            "manager_entra_id": str(manager.get("id") or "").strip(),
-            "manager_name": str(manager.get("displayName") or "").strip(),
-            "manager_email": str(manager.get("mail") or manager.get("userPrincipalName") or "").strip().lower(),
+            "manager_entra_id": str(desired.get("manager_entra_id") or "").strip(),
+            "manager_name": str(desired.get("manager_name") or "").strip(),
+            "manager_email": str(desired.get("manager_email") or "").strip().lower(),
             "zendesk_org_id": int(desired["zendesk_org_id"]),
             "zendesk_org_name": str(desired.get("zendesk_org_name") or ""),
         }
@@ -73,7 +71,7 @@ def _normalize_current(
 
 
 def collect_current_entra_state() -> tuple[dict[str, Any], dict[str, dict[str, Any]], list[dict[str, Any]]]:
-    """Collect the complete in-scope authoritative Entra snapshot with visible progress."""
+    """Collect the complete in-scope authoritative Entra snapshot with manager inline."""
     config = load_config()
     validate_config(config)
     _field_keys(config)
@@ -83,24 +81,21 @@ def collect_current_entra_state() -> tuple[dict[str, Any], dict[str, dict[str, A
     print("      Authenticating to Microsoft Graph...", flush=True)
     graph_token = get_graph_access_token(load_graph_config())
     group_members: list[tuple[dict, list[dict]]] = []
-    all_ids: set[str] = set()
     for index, mapping in enumerate(mappings, start=1):
         group = mapping.get("entra_group") or {}
         group_id = str(group.get("id") or "")
         group_name = str(group.get("name") or group_id)
-        print(f"      [{index}/{len(mappings)}] {group_name}: reading direct user members...", flush=True)
+        print(f"      [{index}/{len(mappings)}] {group_name}: reading direct user members + manager...", flush=True)
         members = get_group_user_members(graph_token, group_id)
         print(f"            {len(members)} user member(s) found.")
         group_members.append((mapping, members))
-        all_ids.update(str(user.get("id") or "") for user in members if user.get("id"))
 
     desired, membership_rows, _in_scope = build_desired_users(group_members, resolutions=resolutions)
     unresolved = [row for row in membership_rows if row.get("action") == "CONFLICT"]
     if unresolved:
         return config, {}, unresolved
 
-    managers = get_user_managers(graph_token, set(desired))
-    current = _normalize_current(desired, managers)
+    current = _normalize_current(desired)
     return config, current, membership_rows
 
 
