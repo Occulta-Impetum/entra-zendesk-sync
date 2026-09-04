@@ -4,20 +4,20 @@ Unattended Microsoft Entra to Zendesk user provisioning and organization synchro
 
 ## Project goals
 
-This project is intended to provide a reusable, self-hosted alternative to the built-in Microsoft Entra Zendesk provisioning connector. It is designed around unattended Microsoft Graph authentication, Zendesk OAuth, Entra group-based scope, and explicit Entra-group-to-Zendesk-organization mappings.
+This project is a reusable, self-hosted alternative to the built-in Microsoft Entra Zendesk provisioning connector. It is designed around unattended Microsoft Graph authentication, Zendesk OAuth, Entra group-based scope, explicit Entra-group-to-Zendesk-organization mappings, and Entra as the authoritative source of user data.
 
 Key design principles:
 
 - Safe by default: synchronization runs in dry-run mode unless `--apply` is explicitly supplied.
-- Entra groups define provisioning scope. Groups may use static or dynamic membership.
-- Selected Entra groups are mapped to Zendesk organizations during setup.
-- Stable object IDs are stored in configuration; names are used only for human-readable setup and reporting.
-- Existing Zendesk users can be adopted by email during initial setup and then linked to Entra using Zendesk `external_id`.
-- Operational synchronization uses the immutable Entra object ID only; email is not used to decide that two people are the same user.
-- Users who leave provisioning scope should be suspended rather than deleted.
-- Ambiguous matches and multiple mapped-group memberships are conflicts until an administrator explicitly resolves them.
-- Slow or asynchronous operations should always provide visible progress output.
-- Dry-run execution requests only read scopes. Write-capable scopes are reserved for explicit `--apply` execution.
+- Entra groups define provisioning scope and map to Zendesk organizations.
+- Stable object IDs are stored in configuration; names are only for readability.
+- Initial bootstrap may adopt an existing Zendesk user by exact email, then writes `external_id: entra:<Entra object ID>`.
+- Operational synchronization never uses email to decide that two people are the same identity.
+- Entra/HR values are authoritative for name, employee ID, job title, manager, enabled state, and organization mapping.
+- Users who leave provisioning scope are suspended rather than deleted.
+- Ambiguous identity or group cases become conflicts rather than guesses.
+- Slow operations always display progress.
+- Dry runs explicitly request read-only scopes; write scopes are reserved for apply paths.
 
 ## Repository structure
 
@@ -28,201 +28,202 @@ entra-zendesk-sync/
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
-│
 ├── setup/
-│   ├── bootstrap_sync.py           # one-time initial migration/bootstrap flow
+│   ├── bootstrap_sync.py           # one-time migration/bootstrap
 │   ├── configure.py
 │   ├── resolve_conflicts.py
 │   ├── review_bootstrap_matches.py
+│   ├── check_user_fields.py        # optional diagnostic only
 │   ├── create_certificate.ps1
 │   ├── test_graph_auth.py
 │   ├── test_group_discovery.py
 │   └── test_zendesk_auth.py
-│
 ├── lib/
-│   ├── __init__.py
-│   ├── runtime.py                  # shared reconciliation/runtime implementation
+│   ├── runtime.py                  # full reconciliation runtime
+│   ├── operational.py              # incremental operational planner
+│   ├── bootstrap_apply.py
 │   ├── bootstrap_review.py
 │   ├── cache.py
 │   ├── conflicts.py
 │   ├── graph.py
 │   ├── zendesk.py
+│   ├── user_fields.py
 │   ├── config.py
 │   ├── reconcile.py
 │   ├── resolutions.py
 │   └── logging_utils.py
-│
 ├── config/
 │   └── config.example.yaml
-│
 ├── cache/
 │   └── .gitignore
-│
 ├── tests/
-│   └── __init__.py
-│
 └── logs/
     └── .gitignore
 ```
 
-The production Scheduled Task should call the small root `sync.py`. Bootstrap-specific matching, conflict resolution, and initial migration review live under `setup/` and are not part of the normal scheduled command.
+The production Scheduled Task should call the small root `sync.py`. Bootstrap-specific matching and migration review live under `setup/` and are not part of the normal scheduled command.
 
-## Setup flow
+## Setup
 
-The graphical setup wizard authenticates to both services, loads available Entra security groups and Zendesk organizations, lets the administrator select provisioning groups with checkboxes, maps each selected group to a Zendesk organization with dropdowns, and writes non-secret configuration to `config/config.yaml`.
-
-Run from the repository root:
+Run the graphical configuration wizard from the repository root:
 
 ```powershell
 python .\setup\configure.py
 ```
 
-Production secrets and machine-specific authentication material must not be committed to Git. Secrets remain in `.env`; tenant-specific configuration, cache data, logs, conflict decisions, and initial-match review decisions are excluded from Git.
+The wizard authenticates to Entra and Zendesk, discovers security groups and organizations, lets the administrator map groups to Zendesk organizations, and writes non-secret configuration to `config/config.yaml`.
 
-## Authentication strategy
+Production secrets remain in `.env`. Certificates, production configuration, caches, logs, and review decisions are excluded from Git.
+
+## Authentication
 
 ### Microsoft Graph
 
-Microsoft Graph access uses unattended application authentication with an Entra app registration and certificate-based client credentials.
+Microsoft Graph uses unattended certificate-based client credentials. The app registration needs application permissions:
 
-The Entra app registration currently needs Microsoft Graph application permissions `User.Read.All` and `GroupMember.Read.All`, both with tenant admin consent.
+- `User.Read.All`
+- `GroupMember.Read.All`
 
-For Windows administrators, `setup/create_certificate.ps1` can create a self-signed RSA certificate, export the public `.cer` file for upload to Entra, and export a password-protected `.pfx` containing the private key for use by the sync runtime.
-
-Validate unattended authentication:
-
-```powershell
-python .\setup\test_graph_auth.py
-python .\setup\test_group_discovery.py
-```
+Both require tenant admin consent.
 
 ### Zendesk
 
-Zendesk access uses OAuth client credentials rather than deprecated API tokens. Setup/organization discovery uses `organizations:read`. Reconciliation explicitly requests `users:read` regardless of the default scope stored in `.env`.
+Zendesk uses OAuth client credentials rather than API tokens. Runtime code requests exact scopes for each operation instead of blindly using the `.env` default.
 
-Validate Zendesk OAuth and organization discovery with:
+OAuth access tokens are cached locally by exact scope set until shortly before expiration. Tokens for different scope sets are never interchanged.
 
-```powershell
-python .\setup\test_zendesk_auth.py
-```
+## Managed Zendesk fields
 
-`ZENDESK_OAUTH_SCOPE` is a fallback for callers that do not explicitly pass a scope. Runtime modes request their own least-privilege scope.
+Bootstrap discovers and validates the Zendesk user-field schema. The sync manages:
+
+- Zendesk standard `name`
+- Zendesk standard `email` on create
+- Zendesk `external_id` as `entra:<Entra object ID>`
+- Zendesk organization from the mapped Entra security group
+- Employee ID in a text user field, default key `employee_id`
+- Job Title in `standard::job_title`
+- Manager in `standard::manager`, a Zendesk user lookup relationship
+
+The Employee ID field is created automatically during bootstrap apply if it does not already exist. Standard Job Title and Manager fields must already exist with the expected Zendesk types.
+
+Manager writes happen after identities are established so the lookup stores the actual target Zendesk user ID.
 
 ## Initial bootstrap workflow
 
-Initial migration uses a dedicated setup entrypoint:
+Dry run:
 
 ```powershell
 python .\setup\bootstrap_sync.py
 ```
 
-Bootstrap identity matching uses `external_id` first and may then use exact email matching to adopt an existing Zendesk user. Repeat bootstrap dry runs may reuse the local Zendesk user snapshot for speed.
-
-Force a fresh snapshot while keeping bootstrap identity rules:
-
-```powershell
-python .\setup\bootstrap_sync.py --refresh-zendesk-cache
-```
-
-After conflict and initial-match decisions are complete, run the final live bootstrap preview:
+Final live preview:
 
 ```powershell
 python .\setup\bootstrap_sync.py --final-dry-run
 ```
 
-The bootstrap final dry run refreshes Zendesk from live data but deliberately **continues using bootstrap email-adoption rules**. It previews the first migration apply, including CREATE, ADOPT, RELINK, name changes, and organization changes that have been reviewed and approved.
+Apply:
 
-Bootstrap `--apply` is reserved for the first write pass and remains disabled until write execution is implemented and validated.
+```powershell
+python .\setup\bootstrap_sync.py --apply
+```
 
-## Conflict review
+Bootstrap identity matching is intentionally different from scheduled operation:
 
-Unresolved reconciliation conflicts are written to `cache/conflicts.json`. Review them with:
+1. exact `external_id` first
+2. exact email fallback only during bootstrap
+3. reviewed email matches can be adopted/relinked
+4. unresolved or ambiguous cases block apply
+
+Bootstrap apply rebuilds its plan from live Entra and Zendesk state, checks required fields, creates Employee ID if needed, requires the administrator to type `APPLY`, performs identity/organization/employee/title writes, then performs manager relationship writes in a second pass and verifies expected Entra external IDs.
+
+A successful bootstrap also seeds the local Entra operational baseline so the first scheduled run does not need to rediscover unchanged Zendesk profiles.
+
+## Conflict and initial-match review
+
+Unresolved identity/group conflicts are written to `cache/conflicts.json` and reviewed with:
 
 ```powershell
 python .\setup\resolve_conflicts.py
 ```
 
-The GUI displays the Entra user, desired group/organization, conflict reason, relevant Zendesk candidates, and a decision control. Decisions are persisted locally in `config/conflict_resolutions.yaml` and automatically applied to later bootstrap dry runs.
-
-## Initial email/name match review
-
-During initial email-based adoption, an existing Zendesk user's name may differ from the Entra name. This is not automatically treated as proof of a different person: nicknames, preferred names, old names, spelling differences, and inconsistent historical entry are common.
-
-Bootstrap dry runs write email-matched `ADOPT`/`RELINK` rows that also contain `UPDATE NAME` to `cache/bootstrap_review.json`. Review them with:
+Initial email-matched users whose Zendesk name differs from the authoritative Entra/HR name are reviewed with:
 
 ```powershell
 python .\setup\review_bootstrap_matches.py
 ```
 
-The GUI shows the Entra/HR identity beside the existing Zendesk identity and lets the administrator approve the existing Zendesk user while standardizing its name to the Entra/HR value, leave the item unresolved, or mark it for manual cleanup. The same decision can be applied in bulk to all reviews of the same type.
-
-For environments where Entra is populated from HR, the intended authoritative name is the HR-provided/legal name. The review exists because a name mismatch alone cannot reliably establish whether the Zendesk profile belongs to another person.
-
-### Reused email address warning
-
-Initial email matching is a migration convenience, not a permanent identity key. If an organization reuses email addresses, an initial email match can identify a Zendesk user that previously belonged to someone else. Approving that match keeps its historical Zendesk tickets and identity history.
-
-After the initial bootstrap writes `external_id: entra:<Entra object ID>`, normal operational synchronization does not fall back to email matching. If an in-scope Entra object ID has no corresponding `entra:<object-id>` in Zendesk, operational reconciliation plans a new user rather than silently taking over an old profile that happens to have the same email address.
+A name difference by itself is not treated as proof of a different person.
 
 ## Operational / scheduled synchronization
 
-The root script is the production entrypoint:
+The normal production entrypoint is:
 
 ```powershell
 python .\sync.py
 ```
 
-It is intentionally small and uses operational identity rules only:
+Normal operation is incremental. The sync:
 
-- `external_id: entra:<Entra object ID>` is authoritative.
-- Existing matching external ID -> maintain the linked Zendesk user.
-- Missing matching external ID -> CREATE.
-- Email is not used for identity adoption.
-- Bootstrap review logic is not loaded by the root entrypoint.
+1. reads the complete current in-scope Entra state
+2. includes employee ID, job title, manager, enabled state, and desired organization
+3. compares that authoritative state to `cache/entra_users.json`
+4. queries Zendesk only for new, changed, or removed Entra identities
+5. uses `external_id: entra:<object-id>` as the identity key
+6. suspends identities removed from provisioning scope
+7. saves the new Entra baseline only after a future successful operational apply
 
-For an operational dry run against a fresh Zendesk snapshot:
+The Entra cache retains historical identity records rather than discarding them. That history is needed to safely recognize reused email addresses after a terminated account has disappeared from Entra.
+
+### Reused email addresses
+
+Operational sync does not adopt by email. If a new Entra object has no matching Zendesk external ID but its desired email is already in use, the sync only treats it as automatic email reuse when it can prove all of the following:
+
+- the current email owner has a different `entra:<old-object-id>`
+- the old Entra object ID is no longer present in the current authoritative snapshot
+- the retained Entra history contains that old object ID
+- the old user has an Employee ID
+- the generated historical alias is not already in use
+
+The planned repair is:
+
+```text
+jsmith@company.com
+employee ID 123456
+       ↓
+old Zendesk user: jsmith123456@company.com
+new Zendesk user: jsmith@company.com
+```
+
+The old Zendesk user is preserved, including its historical tickets. Only its primary email identity is renamed. The new Entra identity is then created as a separate Zendesk user.
+
+Zendesk primary-email replacement uses the User Identities API, not the normal Users API. Zendesk documentation currently states that the User Identities API does not support resource-scoped `users:read/users:write`; therefore the eventual email-reuse apply path must request the broader identity-capable OAuth scope only when that repair is actually required. Normal incremental runs should not request that broad scope.
+
+Any email collision that cannot be proven to be a retired managed identity becomes a conflict rather than being modified automatically.
+
+## Full reconciliation
+
+Normal scheduled runs do not download every Zendesk user. If an administrator intentionally wants to overwrite manual Zendesk drift and force all managed profiles back to Entra values, use:
 
 ```powershell
-python .\sync.py --refresh-zendesk-cache
+python .\sync.py --full-reconcile
 ```
 
-Future scheduled production execution will use:
+`--refresh-zendesk-cache` remains as a deprecated alias for `--full-reconcile`.
 
-```powershell
-python .\sync.py --apply
-```
+A full reconciliation downloads a fresh complete Zendesk snapshot and compares all managed identities. This is intentionally heavier than normal scheduled operation.
 
-Operational `--apply` remains disabled until write execution is implemented and validated. An apply run will re-read live state before making changes rather than blindly executing an old cached plan.
+## Operational apply status
 
-Every run writes full terminal output to a timestamped file under `logs/`.
+Operational `--apply` remains intentionally disabled while the new incremental planner, targeted Zendesk lookup, historical Entra cache, and reused-email detection are validated in dry-run mode.
 
-## Generated configuration
+When enabled, operational apply will:
 
-The GUI writes configuration in this form:
+- re-read fresh Entra state
+- execute only the targeted change set
+- use write-capable user scopes only for normal user changes
+- request identity-capable broad scope only when an email-reuse repair requires the User Identities API
+- verify each collision repair before creating the replacement user
+- save the new Entra cache only after the run completes successfully
 
-```yaml
-version: 1
-entra:
-  tenant_id: "..."
-  client_id: "..."
-zendesk:
-  subdomain: "example"
-  default_role: "end-user"
-mappings:
-  - entra_group:
-      id: "..."
-      name: "Example Zendesk Users"
-    zendesk_organization:
-      id: 123456789
-      name: "Example Organization"
-behavior:
-  suspend_when_out_of_scope: true
-  suspend_when_entra_disabled: true
-  ambiguous_group_membership: conflict
-  protect_zendesk_staff_roles: true
-  dry_run_by_default: true
-```
-
-## Current status
-
-Certificate authentication, Graph group/user discovery, Zendesk OAuth, graphical group-to-organization configuration, cached read-only reconciliation, conflict detection/resolution, graphical initial email/name match review, and separate bootstrap/operational entrypoints are implemented. Write execution remains intentionally disabled until the bootstrap plan and review decisions are validated.
+Every run writes terminal output to a timestamped file under `logs/`.
