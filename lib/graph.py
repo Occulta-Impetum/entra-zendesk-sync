@@ -127,6 +127,41 @@ def graph_get(
         raise GraphError(f"Microsoft Graph returned invalid JSON from {response.url}") from exc
 
 
+def graph_get_all(
+    path_or_url: str,
+    *,
+    access_token: str,
+    params: dict[str, str] | None = None,
+    progress_label: str = "items",
+) -> list[dict[str, Any]]:
+    """Return all pages from a Graph collection while printing visible progress."""
+    items: list[dict[str, Any]] = []
+    next_url = path_or_url
+    first_request = True
+    page = 0
+
+    while next_url:
+        page += 1
+        print(
+            f"      Fetching {progress_label} page {page} "
+            f"({len(items)} received so far)...",
+            flush=True,
+        )
+        payload = graph_get(
+            next_url,
+            access_token=access_token,
+            params=params if first_request else None,
+        )
+        first_request = False
+        page_items = payload.get("value", [])
+        if not isinstance(page_items, list):
+            raise GraphError("Microsoft Graph collection response did not contain a list.")
+        items.extend(page_items)
+        next_url = payload.get("@odata.nextLink") or ""
+
+    return items
+
+
 def get_sample_users(access_token: str, limit: int = 5) -> list[dict[str, Any]]:
     """Return a small read-only sample used to validate User.Read.All access."""
     payload = graph_get(
@@ -142,3 +177,45 @@ def get_sample_users(access_token: str, limit: int = 5) -> list[dict[str, Any]]:
         },
     )
     return list(payload.get("value", []))
+
+
+def get_security_groups(access_token: str) -> list[dict[str, Any]]:
+    """Return Entra security groups, sorted by display name.
+
+    This uses only basic group properties needed by the setup workflow.
+    """
+    groups = graph_get_all(
+        "/groups",
+        access_token=access_token,
+        params={
+            "$select": "id,displayName,description,mailEnabled,securityEnabled,groupTypes",
+            "$filter": "securityEnabled eq true",
+            "$orderby": "displayName",
+            "$top": "100",
+        },
+        progress_label="security groups",
+    )
+    return sorted(groups, key=lambda group: (group.get("displayName") or "").lower())
+
+
+def get_group_user_members(
+    access_token: str,
+    group_id: str,
+) -> list[dict[str, Any]]:
+    """Return direct user members of one group.
+
+    User.Read.All supplies the user properties while the group-membership
+    permission authorizes reading the membership relationship.
+    """
+    return graph_get_all(
+        f"/groups/{group_id}/members/microsoft.graph.user",
+        access_token=access_token,
+        params={
+            "$select": (
+                "id,displayName,userPrincipalName,mail,accountEnabled,"
+                "companyName,officeLocation"
+            ),
+            "$top": "100",
+        },
+        progress_label="group members",
+    )
