@@ -78,23 +78,18 @@ def _search_exact_user(
     access_token: str,
     subdomain: str,
 ) -> dict[str, Any]:
-    print(f"      Searching Zendesk for exact email: {email}", flush=True)
+    print(f"      Searching Zendesk users for exact email: {email}", flush=True)
     payload = zendesk_get(
-        "search.json",
+        "users/search.json",
         subdomain=subdomain,
         access_token=access_token,
-        params={"query": f"type:user email:{email}"},
+        params={"query": f"email:{email}"},
     )
-    results = payload.get("results", [])
+    results = payload.get("users", [])
     if not isinstance(results, list):
-        raise ZendeskError("Zendesk search response did not contain a results list.")
+        raise ZendeskError("Zendesk user-search response did not contain a users list.")
 
-    exact = [
-        item
-        for item in results
-        if str(item.get("result_type") or "") == "user"
-        and _norm(item.get("email")) == _norm(email)
-    ]
+    exact = [item for item in results if _norm(item.get("email")) == _norm(email)]
     if len(exact) != 1:
         raise ZendeskError(
             f"Expected one exact Zendesk user for {email}, found {len(exact)}."
@@ -102,7 +97,7 @@ def _search_exact_user(
 
     user_id = exact[0].get("id")
     if user_id is None:
-        raise ZendeskError(f"Zendesk search result for {email} did not include a user id.")
+        raise ZendeskError(f"Zendesk user-search result for {email} did not include a user id.")
 
     payload = zendesk_get(
         f"users/{int(user_id)}.json",
