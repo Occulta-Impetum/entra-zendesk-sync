@@ -18,6 +18,7 @@ from lib.graph import (
     get_group_user_members,
     load_graph_config,
 )
+from lib.logging_utils import ConsoleLogTee
 from lib.reconcile import build_desired_users, plan_reconciliation, summarize_plan
 from lib.zendesk import ZendeskError, get_access_token, get_users, load_zendesk_config
 
@@ -103,8 +104,7 @@ def _print_details(rows: list[dict]) -> None:
         print()
 
 
-def main() -> int:
-    args = parse_args()
+def _run(args: argparse.Namespace) -> int:
     mode = "APPLY" if args.apply else "DRY RUN"
 
     print(f"Entra -> Zendesk Sync ({mode})")
@@ -187,6 +187,21 @@ def main() -> int:
     print("DRY RUN COMPLETE: no Zendesk data was modified.")
     print(f"Only the explicit read-only Zendesk scope '{ZENDESK_DRY_RUN_SCOPE}' was requested.")
     return 0
+
+
+def main() -> int:
+    args = parse_args()
+    prefix = "sync_apply" if args.apply else "sync_dry_run"
+
+    try:
+        with ConsoleLogTee(prefix=prefix) as log_path:
+            print(f"Log file: {log_path}")
+            exit_code = _run(args)
+            print(f"\nRun complete. Full output saved to: {log_path}")
+            return exit_code
+    except OSError as exc:
+        print(f"ERROR: Unable to create sync log file: {exc}")
+        return 1
 
 
 if __name__ == "__main__":
