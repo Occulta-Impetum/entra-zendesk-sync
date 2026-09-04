@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -16,10 +17,12 @@ REQUEST_TIMEOUT = 30
 TOKEN_EXPIRY_MARGIN_SECONDS = 60
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TOKEN_CACHE_PATH = REPO_ROOT / "cache" / "zendesk_oauth_tokens.json"
+_TOKEN_CONTEXT: dict[str, tuple[dict[str, str], str]] = {}
+_TOKEN_REPLACEMENTS: dict[str, str] = {}
 
 
 class ZendeskError(RuntimeError):
-    """Raised when Zendesk configuration, authentication, or API calls fail."""
+    """Raised when Zendesk configuration, authentication, or requests fail."""
 
 
 def load_zendesk_config() -> dict[str, str]:
@@ -76,7 +79,42 @@ def _load_token_cache() -> dict[str, Any]:
 
 def _save_token_cache(cache: dict[str, Any]) -> None:
     TOKEN_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    TOKEN_CACHE_PATH.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=TOKEN_CACHE_PATH.parent,
+            prefix=f".{TOKEN_CACHE_PATH.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(cache, handle, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, TOKEN_CACHE_PATH)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _register_token(token: str, config: dict[str, str], scope_key: str) -> None:
+    _TOKEN_CONTEXT[token] = (dict(config), scope_key)
+
+
+def _effective_token(token: str) -> str:
+    seen: set[str] = set()
+    current = token
+    while current in _TOKEN_REPLACEMENTS and current not in seen:
+        seen.add(current)
+        current = _TOKEN_REPLACEMENTS[current]
+    return current
 
 
 def get_access_token(config: dict[str, str] | None = None, *, scope: str | None = None, force_new: bool = False) -> tuple[str, dict[str, Any]]:
@@ -94,6 +132,7 @@ def get_access_token(config: dict[str, str] | None = None, *, scope: str | None 
         expires_at = float(cached.get("expires_at") or 0)
         if token and expires_at - TOKEN_EXPIRY_MARGIN_SECONDS > now:
             remaining = max(0, int((expires_at - now) / 60))
+            _register_token(token, config, scope_key)
             print(f"      Reusing cached Zendesk OAuth token for exact scopes [{scope_key}] (~{remaining} min remaining).")
             return token, {"access_token": token, "scope": scope_key, "expires_in": max(0, int(expires_at - now)), "cached": True}
     print(f"      Requesting a new Zendesk OAuth token for exact scopes [{scope_key}]...")
@@ -113,22 +152,57 @@ def get_access_token(config: dict[str, str] | None = None, *, scope: str | None 
     token = data.get("access_token")
     if not token:
         raise ZendeskError("Zendesk OAuth response did not contain an access token.")
+    token = str(token)
     expires_in = int(data.get("expires_in") or 1800)
-    cache[cache_key] = {"access_token": str(token), "scope": scope_key, "expires_at": now + expires_in}
+    cache[cache_key] = {"access_token": token, "scope": scope_key, "expires_at": now + expires_in}
     try:
         _save_token_cache(cache)
     except OSError:
         pass
+    _register_token(token, config, scope_key)
     print(f"      Cached new Zendesk OAuth token for exact scopes [{scope_key}] (expires in ~{max(0, int(expires_in / 60) - 1)} min).")
-    return str(token), data
+    return token, data
+
+
+def _request_once(
+    method: str,
+    url: str,
+    *,
+    access_token: str,
+    params: dict[str, str] | None,
+    json_body: dict[str, Any] | None,
+) -> requests.Response:
+    return requests.request(
+        method.upper(),
+        url,
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "Content-Type": "application/json"},
+        params=params,
+        json=json_body,
+        timeout=REQUEST_TIMEOUT,
+    )
 
 
 def zendesk_request(method: str, path_or_url: str, *, subdomain: str, access_token: str, params: dict[str, str] | None = None, json_body: dict[str, Any] | None = None) -> dict[str, Any]:
     url = path_or_url if path_or_url.lower().startswith("https://") else f"https://{subdomain}.zendesk.com/api/v2/{path_or_url.lstrip('/')}"
+    token = _effective_token(access_token)
     try:
-        response = requests.request(method.upper(), url, headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "Content-Type": "application/json"}, params=params, json=json_body, timeout=REQUEST_TIMEOUT)
+        response = _request_once(method, url, access_token=token, params=params, json_body=json_body)
     except requests.RequestException as exc:
         raise ZendeskError(f"Zendesk API request failed: {exc}") from exc
+
+    if response.status_code == 401:
+        context = _TOKEN_CONTEXT.get(token) or _TOKEN_CONTEXT.get(access_token)
+        if context is not None:
+            config, scope_key = context
+            print(f"      Zendesk returned HTTP 401; refreshing exact scopes [{scope_key}] and retrying once...", flush=True)
+            replacement, _ = get_access_token(config, scope=scope_key, force_new=True)
+            _TOKEN_REPLACEMENTS[access_token] = replacement
+            _TOKEN_REPLACEMENTS[token] = replacement
+            try:
+                response = _request_once(method, url, access_token=replacement, params=params, json_body=json_body)
+            except requests.RequestException as exc:
+                raise ZendeskError(f"Zendesk API retry failed: {exc}") from exc
+
     if not response.ok:
         detail = _safe_error_detail(response)
         raise ZendeskError(f"{method.upper()} {response.url} failed with HTTP {response.status_code}." + (f" Response: {detail}" if detail else ""))
