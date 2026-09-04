@@ -143,8 +143,16 @@ def plan_reconciliation(
     suspend_when_entra_disabled: bool = True,
     protect_zendesk_staff_roles: bool = True,
     resolutions: dict[str, dict[str, Any]] | None = None,
+    allow_email_bootstrap: bool = True,
 ) -> list[dict[str, Any]]:
-    """Compare desired Entra state to Zendesk and return a no-write action plan."""
+    """Compare desired Entra state to Zendesk and return a no-write action plan.
+
+    During initial/bootstrap reconciliation, ``allow_email_bootstrap`` permits an
+    Entra user with no matching external_id to adopt an existing Zendesk user by
+    exact email. Operational reconciliation disables that behavior: external_id
+    is authoritative, and an enabled Entra user with no matching external_id is
+    planned as CREATE without inspecting Zendesk email matches.
+    """
     resolutions = resolutions or {}
     by_external: dict[str, list[dict[str, Any]]] = defaultdict(list)
     by_email: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -153,9 +161,10 @@ def plan_reconciliation(
         external_id = str(user.get("external_id") or "").strip()
         if external_id:
             by_external[external_id].append(user)
-        email = _norm_email(user.get("email"))
-        if email:
-            by_email[email].append(user)
+        if allow_email_bootstrap:
+            email = _norm_email(user.get("email"))
+            if email:
+                by_email[email].append(user)
 
     plan: list[dict[str, Any]] = []
     matched_zendesk_ids: set[int] = set()
@@ -187,7 +196,7 @@ def plan_reconciliation(
         if len(external_matches) == 1:
             zendesk_user = external_matches[0]
             matched_by = "external_id"
-        else:
+        elif allow_email_bootstrap:
             email = desired["email"]
             email_matches = by_email.get(email, []) if email else []
             if len(email_matches) > 1:
@@ -223,9 +232,17 @@ def plan_reconciliation(
                 plan.append(
                     _row(desired, "NO CHANGE", "Entra account is disabled and no Zendesk user exists.")
                 )
-            else:
+            elif allow_email_bootstrap:
                 plan.append(
                     _row(desired, "CREATE", "No Zendesk user matched by external_id or email.")
+                )
+            else:
+                plan.append(
+                    _row(
+                        desired,
+                        "CREATE",
+                        "No Zendesk user matched this Entra external_id; operational mode does not match by email.",
+                    )
                 )
             continue
 
