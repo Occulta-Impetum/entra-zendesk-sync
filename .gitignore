@@ -15,6 +15,7 @@ env/
 .env
 .envrc
 config/config.yaml
+config/conflict_resolutions.yaml
 
 # Certificates / private keys
 *.cer
