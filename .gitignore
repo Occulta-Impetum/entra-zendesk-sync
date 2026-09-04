@@ -27,9 +27,11 @@ config/config.yaml
 setup/certificates/*
 !setup/certificates/.gitignore
 
-# Logs and generated output
+# Logs, caches, and generated output
 logs/*
 !logs/.gitignore
+cache/*
+!cache/.gitignore
 exports/
 
 # Build / packaging
