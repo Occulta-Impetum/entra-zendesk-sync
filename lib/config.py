@@ -104,6 +104,10 @@ def build_config(
             "ambiguous_group_membership": "conflict",
             "protect_zendesk_staff_roles": True,
             "dry_run_by_default": True,
+            "max_removed_users_per_run": 10,
+            "max_removed_percent_per_run": 5.0,
+            "max_changed_users_per_run": 50,
+            "max_changed_percent_per_run": 15.0,
         },
     }
 
