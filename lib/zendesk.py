@@ -128,14 +128,16 @@ def get_access_token(
     return str(token), data
 
 
-def zendesk_get(
+def zendesk_request(
+    method: str,
     path_or_url: str,
     *,
     subdomain: str,
     access_token: str,
     params: dict[str, str] | None = None,
+    json_body: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Perform an authenticated GET request against the Zendesk API."""
+    """Perform an authenticated Zendesk API request and return JSON when present."""
     url = (
         path_or_url
         if path_or_url.lower().startswith("https://")
@@ -143,13 +145,16 @@ def zendesk_get(
     )
 
     try:
-        response = requests.get(
+        response = requests.request(
+            method.upper(),
             url,
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json",
+                "Content-Type": "application/json",
             },
             params=params,
+            json=json_body,
             timeout=REQUEST_TIMEOUT,
         )
     except requests.RequestException as exc:
@@ -159,13 +164,87 @@ def zendesk_get(
         detail = _safe_error_detail(response)
         suffix = f" Response: {detail}" if detail else ""
         raise ZendeskError(
-            f"GET {response.url} failed with HTTP {response.status_code}.{suffix}"
+            f"{method.upper()} {response.url} failed with HTTP {response.status_code}.{suffix}"
         )
 
+    if not response.content:
+        return {}
     try:
         return response.json()
     except ValueError as exc:
         raise ZendeskError(f"Zendesk returned invalid JSON from {response.url}") from exc
+
+
+def zendesk_get(
+    path_or_url: str,
+    *,
+    subdomain: str,
+    access_token: str,
+    params: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Perform an authenticated GET request against the Zendesk API."""
+    return zendesk_request(
+        "GET",
+        path_or_url,
+        subdomain=subdomain,
+        access_token=access_token,
+        params=params,
+    )
+
+
+def create_user(
+    access_token: str,
+    subdomain: str,
+    *,
+    name: str,
+    email: str,
+    external_id: str,
+    organization_id: int,
+) -> dict[str, Any]:
+    """Create one Zendesk end user for an Entra-managed identity."""
+    payload = {
+        "user": {
+            "name": name,
+            "email": email,
+            "external_id": external_id,
+            "organization_id": organization_id,
+            "role": "end-user",
+        }
+    }
+    data = zendesk_request(
+        "POST",
+        "users.json",
+        subdomain=subdomain,
+        access_token=access_token,
+        json_body=payload,
+    )
+    user = data.get("user")
+    if not isinstance(user, dict) or user.get("id") is None:
+        raise ZendeskError("Zendesk create-user response did not contain a user id.")
+    return user
+
+
+def update_user(
+    access_token: str,
+    subdomain: str,
+    user_id: int,
+    *,
+    fields: dict[str, Any],
+) -> dict[str, Any]:
+    """Update writable fields on one Zendesk user."""
+    if not fields:
+        return {}
+    data = zendesk_request(
+        "PUT",
+        f"users/{int(user_id)}.json",
+        subdomain=subdomain,
+        access_token=access_token,
+        json_body={"user": fields},
+    )
+    user = data.get("user")
+    if not isinstance(user, dict):
+        raise ZendeskError(f"Zendesk update response for user {user_id} did not contain a user object.")
+    return user
 
 
 def get_organizations(
