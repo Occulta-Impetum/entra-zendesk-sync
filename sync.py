@@ -12,6 +12,7 @@ import argparse
 
 from lib.logging_utils import ConsoleLogTee
 from lib.operational import initialize_entra_baseline, run_incremental_dry_run
+from lib.operational_apply import run_operational_apply
 from lib.runtime import RuntimeOptions, run_read_only
 
 
@@ -44,7 +45,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="Apply operational changes. Write execution remains disabled until the incremental plan is validated.",
+        help=(
+            "Apply the guarded incremental operational plan to Zendesk. The plan is rebuilt from fresh Entra "
+            "state at execution time, change-volume safety limits are enforced, and the Entra baseline advances "
+            "only after all writes complete successfully."
+        ),
     )
     return parser.parse_args()
 
@@ -61,14 +66,9 @@ def main() -> int:
         return 2
 
     if args.apply:
-        print(
-            "ERROR: operational --apply is intentionally disabled until the new incremental, "
-            "email-reuse, and targeted-lookup workflow has been validated in dry-run mode. "
-            "No write-capable Zendesk token was requested and no changes were made."
-        )
-        return 2
-
-    if args.initialize_baseline:
+        prefix = "sync_incremental_apply"
+        runner = run_operational_apply
+    elif args.initialize_baseline:
         prefix = "sync_initialize_baseline"
         runner = initialize_entra_baseline
     else:
