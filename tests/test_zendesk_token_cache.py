@@ -38,6 +38,10 @@ class ZendeskTokenCacheTests(unittest.TestCase):
         }
         return response
 
+    def _cache_key(self, scope: str) -> str:
+        normalized = zendesk._scope_key(scope)
+        return f"{self.config['subdomain']}|{self.config['client_id']}|{normalized}"
+
     @patch("lib.zendesk.requests.post")
     def test_first_request_is_cached_and_second_request_reuses_token(self, post: Mock) -> None:
         post.return_value = self._response()
@@ -56,17 +60,11 @@ class ZendeskTokenCacheTests(unittest.TestCase):
     def test_scope_sets_are_cached_separately(self, post: Mock) -> None:
         post.side_effect = [
             self._response(token="read-token", scope="users:read"),
-            self._response(
-                token="write-token",
-                scope="users:read users:write",
-            ),
+            self._response(token="write-token", scope="users:read users:write"),
         ]
 
         read_token, _ = zendesk.get_access_token(self.config, scope="users:read")
-        write_token, _ = zendesk.get_access_token(
-            self.config,
-            scope="users:write users:read",
-        )
+        write_token, _ = zendesk.get_access_token(self.config, scope="users:write users:read")
         read_token_again, _ = zendesk.get_access_token(self.config, scope="users:read")
 
         self.assertEqual("read-token", read_token)
@@ -76,23 +74,16 @@ class ZendeskTokenCacheTests(unittest.TestCase):
 
     @patch("lib.zendesk.requests.post")
     def test_nearly_expired_token_is_not_reused(self, post: Mock) -> None:
-        normalized = zendesk._normalize_scope("users:read")
-        key = zendesk._token_cache_key(self.config, normalized)
+        key = self._cache_key("users:read")
         self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.cache_path.write_text(
             json.dumps(
                 {
-                    "version": 1,
-                    "entries": {
-                        key: {
-                            "access_token": "old-token",
-                            "expires_at": time.time() + 30,
-                            "scope": normalized,
-                            "token_type": "bearer",
-                            "subdomain": "example",
-                            "client_id": "client-123",
-                        }
-                    },
+                    key: {
+                        "access_token": "old-token",
+                        "expires_at": time.time() + 30,
+                        "scope": "users:read",
+                    }
                 }
             ),
             encoding="utf-8",
@@ -112,11 +103,7 @@ class ZendeskTokenCacheTests(unittest.TestCase):
         ]
 
         first, _ = zendesk.get_access_token(self.config, scope="users:read")
-        second, _ = zendesk.get_access_token(
-            self.config,
-            scope="users:read",
-            force_new=True,
-        )
+        second, _ = zendesk.get_access_token(self.config, scope="users:read", force_new=True)
 
         self.assertEqual("first-token", first)
         self.assertEqual("second-token", second)
