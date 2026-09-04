@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,34 @@ class CacheError(RuntimeError):
     """Raised when a local cache cannot be read or written safely."""
 
 
+def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
+    """Write JSON to a sibling temp file, fsync it, then atomically replace the target."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temp_path = Path(handle.name)
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp_path, path)
+        temp_path = None
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
 def save_zendesk_users_cache(
     users: list[dict[str, Any]],
     *,
@@ -38,9 +68,7 @@ def save_zendesk_users_cache(
         "users": users,
     }
     try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with cache_path.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
+        _atomic_json_write(cache_path, payload)
     except (OSError, TypeError, ValueError) as exc:
         raise CacheError(f"Unable to save Zendesk user cache to {cache_path}: {exc}") from exc
     return cache_path
@@ -119,9 +147,7 @@ def save_entra_users_cache(
         "history": history,
     }
     try:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        with cache_path.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        _atomic_json_write(cache_path, payload)
     except (OSError, TypeError, ValueError) as exc:
         raise CacheError(f"Unable to save Entra user cache to {cache_path}: {exc}") from exc
     return cache_path
