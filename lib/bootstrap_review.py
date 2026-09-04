@@ -108,10 +108,11 @@ def save_review_decisions(
 def unresolved_review_candidates(
     candidates: list[dict[str, Any]], decisions: dict[str, dict[str, Any]]
 ) -> list[dict[str, Any]]:
+    """Return candidates not explicitly approved for automatic bootstrap changes."""
     unresolved: list[dict[str, Any]] = []
     for candidate in candidates:
         entra_id = str(candidate.get("entra_id") or "")
         decision = str((decisions.get(entra_id) or {}).get("decision") or "")
-        if decision not in {"approve_hr_name", "manual_review"}:
+        if decision != "approve_hr_name":
             unresolved.append(candidate)
     return unresolved
