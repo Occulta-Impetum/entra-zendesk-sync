@@ -23,7 +23,9 @@ from lib.graph import (  # noqa: E402
 
 
 def _safe(value: object | None) -> str:
-    text = str(value or "").strip()
+    if value is None:
+        return "-"
+    text = str(value).strip()
     return text if text else "-"
 
 
