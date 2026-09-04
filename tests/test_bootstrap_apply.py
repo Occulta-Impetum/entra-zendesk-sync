@@ -5,7 +5,17 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from lib.bootstrap_apply import BootstrapApplyError, _validate_apply_plan, _write_row
+from lib.bootstrap_apply import (
+    BootstrapApplyError,
+    _validate_apply_plan,
+    _write_row_first_pass,
+)
+
+FIELD_KEYS = {
+    "employee_id": "employee_id",
+    "job_title": "standard::job_title",
+    "manager": "standard::manager",
+}
 
 
 class BootstrapApplyValidationTests(unittest.TestCase):
@@ -22,10 +32,10 @@ class BootstrapApplyValidationTests(unittest.TestCase):
         with self.assertRaises(BootstrapApplyError):
             _validate_apply_plan(plan, [], [])
 
-    def test_allows_current_bootstrap_action_types(self) -> None:
+    def test_allows_extended_bootstrap_action_types(self) -> None:
         plan = [
-            {"action": "CREATE", "name": "New User", "email": "new@example.com"},
-            {"action": "ADOPT + UPDATE NAME + UPDATE ORGANIZATION", "name": "Existing", "email": "e@example.com"},
+            {"action": "CREATE + UPDATE EMPLOYEE ID + UPDATE JOB TITLE + UPDATE MANAGER", "name": "New User", "email": "new@example.com"},
+            {"action": "ADOPT + UPDATE NAME + UPDATE ORGANIZATION + UPDATE JOB TITLE", "name": "Existing", "email": "e@example.com"},
             {"action": "RELINK", "name": "Legacy", "email": "l@example.com"},
             {"action": "PROTECTED", "name": "Admin", "email": "admin@example.com"},
         ]
@@ -34,15 +44,22 @@ class BootstrapApplyValidationTests(unittest.TestCase):
 
 class BootstrapApplyWriteTests(unittest.TestCase):
     @patch("lib.bootstrap_apply.create_user")
-    def test_create_sets_entra_external_id(self, create_user_mock) -> None:
+    def test_create_sets_entra_external_id_and_user_fields(self, create_user_mock) -> None:
         row = {
-            "action": "CREATE",
+            "action": "CREATE + UPDATE EMPLOYEE ID + UPDATE JOB TITLE",
             "entra_id": "abc-123",
             "name": "New User",
             "email": "new@example.com",
             "zendesk_org_id": 42,
+            "employee_id": "12345",
+            "job_title": "Sales Manager",
         }
-        result = _write_row(row, access_token="token", subdomain="example")
+        result = _write_row_first_pass(
+            row,
+            access_token="token",
+            subdomain="example",
+            field_keys=FIELD_KEYS,
+        )
         self.assertEqual(result, "CREATED")
         create_user_mock.assert_called_once_with(
             "token",
@@ -51,19 +68,30 @@ class BootstrapApplyWriteTests(unittest.TestCase):
             email="new@example.com",
             external_id="entra:abc-123",
             organization_id=42,
+            user_fields={
+                "employee_id": "12345",
+                "standard::job_title": "Sales Manager",
+            },
         )
 
     @patch("lib.bootstrap_apply.update_user")
-    def test_adopt_combines_external_name_and_org_update(self, update_user_mock) -> None:
+    def test_adopt_combines_identity_org_and_user_field_updates(self, update_user_mock) -> None:
         row = {
-            "action": "ADOPT + UPDATE NAME + UPDATE ORGANIZATION",
+            "action": "ADOPT + UPDATE NAME + UPDATE ORGANIZATION + UPDATE EMPLOYEE ID",
             "entra_id": "abc-123",
             "name": "HR Name",
             "email": "person@example.com",
             "zendesk_id": 99,
             "zendesk_org_id": 42,
+            "employee_id": "9001",
+            "job_title": "",
         }
-        result = _write_row(row, access_token="token", subdomain="example")
+        result = _write_row_first_pass(
+            row,
+            access_token="token",
+            subdomain="example",
+            field_keys=FIELD_KEYS,
+        )
         self.assertEqual(result, "UPDATED")
         update_user_mock.assert_called_once_with(
             "token",
@@ -73,15 +101,28 @@ class BootstrapApplyWriteTests(unittest.TestCase):
                 "external_id": "entra:abc-123",
                 "name": "HR Name",
                 "organization_id": 42,
+                "user_fields": {"employee_id": "9001"},
             },
         )
 
     @patch("lib.bootstrap_apply.update_user")
+    def test_manager_only_row_waits_for_second_pass(self, update_user_mock) -> None:
+        result = _write_row_first_pass(
+            {"action": "UPDATE MANAGER", "entra_id": "abc-123"},
+            access_token="token",
+            subdomain="example",
+            field_keys=FIELD_KEYS,
+        )
+        self.assertEqual(result, "SKIPPED")
+        update_user_mock.assert_not_called()
+
+    @patch("lib.bootstrap_apply.update_user")
     def test_protected_row_never_writes(self, update_user_mock) -> None:
-        result = _write_row(
+        result = _write_row_first_pass(
             {"action": "PROTECTED", "entra_id": "abc-123"},
             access_token="token",
             subdomain="example",
+            field_keys=FIELD_KEYS,
         )
         self.assertEqual(result, "SKIPPED")
         update_user_mock.assert_not_called()
