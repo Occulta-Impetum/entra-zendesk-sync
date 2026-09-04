@@ -12,7 +12,8 @@ Key design principles:
 - Entra groups define provisioning scope. Groups may use static or dynamic membership.
 - Selected Entra groups are mapped to Zendesk organizations during setup.
 - Stable object IDs are stored in configuration; names are used only for human-readable setup and reporting.
-- Existing Zendesk users can be adopted by email initially and then linked to Entra using Zendesk `external_id`.
+- Existing Zendesk users can be adopted by email during initial setup and then linked to Entra using Zendesk `external_id`.
+- After initial setup, operational identity matching uses the immutable Entra object ID only; email is not used to decide that two people are the same user.
 - Users who leave provisioning scope should be suspended rather than deleted.
 - Ambiguous matches and multiple mapped-group memberships are conflicts until an administrator explicitly resolves them.
 - Slow or asynchronous operations should always provide visible progress output.
@@ -31,6 +32,7 @@ entra-zendesk-sync/
 ├── setup/
 │   ├── configure.py
 │   ├── resolve_conflicts.py
+│   ├── review_bootstrap_matches.py
 │   ├── create_certificate.ps1
 │   ├── test_graph_auth.py
 │   ├── test_group_discovery.py
@@ -38,6 +40,7 @@ entra-zendesk-sync/
 │
 ├── lib/
 │   ├── __init__.py
+│   ├── bootstrap_review.py
 │   ├── cache.py
 │   ├── conflicts.py
 │   ├── graph.py
@@ -72,7 +75,7 @@ python .\setup\configure.py
 
 The group-selection page includes search/filtering, Select All Visible, Clear Visible, scrolling, and preservation of existing selections when the wizard is rerun. The mapping page provides one Zendesk organization dropdown per selected Entra group and restores existing mappings where possible.
 
-Production secrets and machine-specific authentication material must not be committed to Git. Secrets remain in `.env`; tenant-specific configuration, cache data, logs, and conflict decisions are excluded from Git.
+Production secrets and machine-specific authentication material must not be committed to Git. Secrets remain in `.env`; tenant-specific configuration, cache data, logs, conflict decisions, and initial-match review decisions are excluded from Git.
 
 ## Authentication strategy
 
@@ -127,13 +130,15 @@ Force a fresh Zendesk snapshot with:
 python .\sync.py --refresh-zendesk-cache
 ```
 
-After setup decisions are complete, run a final live comparison with:
+Normal dry runs are the initial/bootstrap workflow: they match `external_id` first and may use an exact email match to adopt an existing Zendesk user. After initial setup is complete, operational runs use `external_id: entra:<Entra object ID>` as the authoritative identity key and do not use email to decide whether an existing Zendesk profile is the same person.
+
+A production-behavior preview can be run with:
 
 ```powershell
 python .\sync.py --final-dry-run
 ```
 
-The final dry run ignores the cached Zendesk snapshot, refreshes live state, and reports the expected next `--apply` plan. A future `--apply` execution will still re-read live state before making changes.
+The final dry run ignores the cached Zendesk snapshot, refreshes live state, and uses external-ID-only operational identity rules. Write execution is still disabled while the initial bootstrap plan is being validated.
 
 Every run writes the full terminal output to a timestamped file under `logs/`.
 
@@ -147,11 +152,25 @@ python .\setup\resolve_conflicts.py
 
 The GUI displays the Entra user, desired group/organization, conflict reason, relevant Zendesk candidates, and a decision control. Supported decisions include choosing a mapped group, choosing a specific Zendesk candidate where safe, intentionally replacing a pre-existing Zendesk external ID during initial adoption, skipping the Entra user, or leaving the conflict unresolved. Decisions are persisted locally in `config/conflict_resolutions.yaml` and automatically applied to later dry runs.
 
+## Initial email/name match review
+
+During initial email-based adoption, an existing Zendesk user's name may differ from the Entra name. This is not automatically treated as proof of a different person: nicknames, preferred names, old names, spelling differences, and inconsistent historical entry are common.
+
+The normal dry run writes email-matched `ADOPT`/`RELINK` rows that also contain `UPDATE NAME` to `cache/bootstrap_review.json`. Review them with:
+
+```powershell
+python .\setup\review_bootstrap_matches.py
+```
+
+The GUI shows the Entra/HR identity beside the existing Zendesk identity and lets the administrator either approve the existing Zendesk user while standardizing its name to the Entra/HR value, leave the item unresolved, or mark it for manual cleanup. The same decision can be applied in bulk to all reviews of the same type. Decisions are stored locally in `config/bootstrap_review_resolutions.yaml`.
+
+For environments where Entra is populated from HR, the intended authoritative name is the HR-provided/legal name. The review exists because a name mismatch alone cannot reliably establish whether the Zendesk profile belongs to another person.
+
 ### Reused email address warning
 
-Initial email matching is a migration convenience, not a permanent identity key. If an organization reuses email addresses, an initial email match can identify a Zendesk user that previously belonged to someone else. Adopting or relinking that Zendesk user keeps its historical Zendesk tickets and identity history.
+Initial email matching is a migration convenience, not a permanent identity key. If an organization reuses email addresses, an initial email match can identify a Zendesk user that previously belonged to someone else. Approving that match keeps its historical Zendesk tickets and identity history.
 
-Once the sync writes `external_id: entra:<Entra object ID>`, that immutable Entra object ID becomes the primary match. If a different Entra user later receives the same email address, the sync will not silently rename or take over the already-linked Zendesk user: the email match will encounter the different existing external ID and be raised as a conflict for administrator review.
+After initial setup, the sync does not fall back to email matching. If an in-scope Entra object ID has no corresponding `entra:<object-id>` in Zendesk, operational reconciliation plans a new user rather than silently renaming an old profile that happens to have the same email address. Zendesk itself requires email identities to be unique, so a genuinely reused email that is still attached to an old Zendesk user may require manual Zendesk identity cleanup before a separate new user can be created.
 
 ## Generated configuration
 
@@ -182,4 +201,4 @@ behavior:
 
 ## Current status
 
-Certificate authentication, Graph group/user discovery, Zendesk OAuth, graphical group-to-organization configuration, cached read-only reconciliation, conflict detection, and graphical conflict decision persistence are implemented. Write execution remains intentionally disabled until the dry-run plan and conflict decisions are validated.
+Certificate authentication, Graph group/user discovery, Zendesk OAuth, graphical group-to-organization configuration, cached read-only reconciliation, conflict detection/resolution, and graphical initial email/name match review are implemented. Write execution remains intentionally disabled until the bootstrap plan and review decisions are validated.
