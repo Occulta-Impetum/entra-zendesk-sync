@@ -31,6 +31,7 @@ entra-zendesk-sync/
 │   ├── configure.py
 │   ├── create_certificate.ps1
 │   ├── test_graph_auth.py
+│   ├── test_group_discovery.py
 │   └── test_zendesk_auth.py
 │
 ├── lib/
@@ -51,19 +52,19 @@ entra-zendesk-sync/
     └── .gitignore
 ```
 
-## Planned setup flow
+## Setup flow
 
-The setup wizard will guide the administrator through:
+The graphical setup wizard authenticates to both services, loads available Entra security groups and Zendesk organizations, lets the administrator select provisioning groups with checkboxes, maps each selected group to a Zendesk organization with dropdowns, and writes non-secret configuration to `config/config.yaml`.
 
-1. Microsoft Graph authentication validation.
-2. Entra group discovery and selection.
-3. Zendesk OAuth authentication validation.
-4. Zendesk organization discovery.
-5. Entra group to Zendesk organization mapping.
-6. Provisioning behavior choices.
-7. Saving non-secret configuration to `config/config.yaml`.
+Run from the repository root:
 
-Production secrets and machine-specific authentication material must not be committed to Git.
+```powershell
+python .\setup\configure.py
+```
+
+The group-selection page includes search/filtering, Select All Visible, Clear Visible, scrolling, and preservation of existing selections when the wizard is rerun. The mapping page provides one Zendesk organization dropdown per selected Entra group and restores existing mappings where possible. The wizard validates that every selected group has an organization before saving.
+
+Production secrets and machine-specific authentication material must not be committed to Git. Secrets remain in `.env`; `config/config.yaml` stores immutable object IDs and human-readable names only.
 
 ## Authentication strategy
 
@@ -71,7 +72,7 @@ Production secrets and machine-specific authentication material must not be comm
 
 Microsoft Graph access uses unattended application authentication with an Entra app registration and certificate-based client credentials.
 
-The initial Entra app registration needs Microsoft Graph application permission `User.Read.All` with tenant admin consent. Additional group-read permissions will be added only when group discovery is implemented.
+The Entra app registration currently needs Microsoft Graph application permissions `User.Read.All` and `GroupMember.Read.All`, both with tenant admin consent.
 
 For Windows administrators, `setup/create_certificate.ps1` can create a self-signed RSA certificate, export the public `.cer` file for upload to Entra, and export a password-protected `.pfx` containing the private key for use by the sync runtime.
 
@@ -83,27 +84,50 @@ Run from PowerShell:
 
 The script writes certificate files under `setup/certificates/` by default. Certificate and private-key files are excluded from Git. Upload only the `.cer` file to the Entra app registration. Keep the `.pfx` file and its password private.
 
-Copy `.env.example` to `.env` and populate:
-
-```text
-ENTRA_TENANT_ID=<Directory tenant ID>
-ENTRA_CLIENT_ID=<Application client ID>
-ENTRA_CERTIFICATE_PATH=C:\path\to\entra-zendesk-sync.pfx
-ENTRA_CERTIFICATE_PASSWORD=<PFX password>
-```
-
-Then validate unattended authentication and `User.Read.All` access:
+Copy `.env.example` to `.env` and populate the Entra values, then validate unattended authentication:
 
 ```powershell
 python .\setup\test_graph_auth.py
+python .\setup\test_group_discovery.py
 ```
-
-The test obtains an app-only token with the PFX certificate and performs a read-only query for five sample users. It prints `displayName`, `userPrincipalName`, `mail`, `accountEnabled`, `companyName`, `officeLocation`, and the Entra object ID. It does not modify Entra data.
 
 ### Zendesk
 
-Zendesk access will use OAuth rather than deprecated Zendesk API tokens.
+Zendesk access uses OAuth client credentials rather than deprecated API tokens. The setup/discovery stage requires `organizations:read`.
+
+Validate Zendesk OAuth and organization discovery with:
+
+```powershell
+python .\setup\test_zendesk_auth.py
+```
+
+## Generated configuration
+
+The GUI writes configuration in this form:
+
+```yaml
+version: 1
+entra:
+  tenant_id: "..."
+  client_id: "..."
+zendesk:
+  subdomain: "example"
+  default_role: "end-user"
+mappings:
+  - entra_group:
+      id: "..."
+      name: "Example Zendesk Users"
+    zendesk_organization:
+      id: 123456789
+      name: "Example Organization"
+behavior:
+  suspend_when_out_of_scope: true
+  suspend_when_entra_disabled: true
+  ambiguous_group_membership: conflict
+  protect_zendesk_staff_roles: true
+  dry_run_by_default: true
+```
 
 ## Current status
 
-Repository scaffolding, Windows certificate setup, and read-only unattended Microsoft Graph authentication are implemented. The next milestone is Entra group discovery and selection.
+Certificate authentication, Microsoft Graph user/group discovery, Zendesk OAuth organization discovery, and the graphical Entra-group-to-Zendesk-organization configuration wizard are implemented. The next major milestone is reconciliation and sync execution logic.
