@@ -20,7 +20,7 @@ from lib.graph import (
     get_group_user_members,
     load_graph_config,
 )
-from lib.logging_utils import ConsoleLogTee
+from lib.logging_utils import ConsoleLogTee, print_attention
 from lib.reconcile import build_desired_users, plan_reconciliation, summarize_plan
 from lib.resolutions import ResolutionError, load_resolutions
 from lib.zendesk import ZendeskError, get_access_token, get_users, load_zendesk_config
@@ -273,9 +273,11 @@ def _run(args: argparse.Namespace) -> int:
     _print_details(plan)
 
     if unresolved_conflicts:
-        print("CONFLICT REVIEW REQUIRED:")
-        print("Run: python .\\setup\\resolve_conflicts.py")
-        print("Then run the dry run again to apply those saved decisions to the plan.")
+        print_attention(
+            "\n!!! CONFLICT REVIEW REQUIRED !!!\n"
+            "Run: python .\\setup\\resolve_conflicts.py\n"
+            "Then run the dry run again to apply those saved decisions to the plan."
+        )
         print()
 
     if args.final_dry_run:
