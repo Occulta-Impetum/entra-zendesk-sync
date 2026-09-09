@@ -94,9 +94,10 @@ git --version
 python --version
 python -m pip --version
 where.exe python
+$PSVersionTable.PSVersion
 ```
 
-Do not continue until all four commands succeed. For a production server, confirm the selected `python.exe` is the machine-wide installation and is **not** under a specific administrator's user profile.
+Do not continue until the Git/Python commands succeed and PowerShell reports version 5.1 or newer. For a production server, confirm the selected `python.exe` is the machine-wide installation and is **not** under a specific administrator's user profile.
 
 > If the server is Windows Server Core without a graphical desktop/Tkinter capability, the current graphical `setup/configure.py` wizard cannot be used directly there. Run first-time configuration from a Windows machine with GUI support and securely transfer the resulting machine-specific configuration/state as appropriate, or add a non-GUI configuration path before deploying to Server Core.
 
@@ -141,12 +142,17 @@ A helper script is included:
 powershell -ExecutionPolicy Bypass -File .\setup\create_certificate.ps1
 ```
 
-It creates:
+By default it creates the certificate pair under the repository's `certificates\` directory:
+
+```text
+certificates\entra-zendesk-sync.cer
+certificates\entra-zendesk-sync.pfx
+```
 
 - `entra-zendesk-sync.cer` — public certificate uploaded to the Entra app registration
 - `entra-zendesk-sync.pfx` — password-protected certificate/private-key bundle kept only on the trusted runtime machine
 
-The helper defaults to a two-year certificate and refuses to overwrite an existing certificate pair.
+The helper defaults to a two-year certificate and refuses to overwrite an existing certificate pair. Record the expiration date and plan certificate rotation before it expires.
 
 Upload only the `.cer` file to the Entra app registration. Never upload or commit the `.pfx` file.
 
@@ -217,6 +223,16 @@ ZENDESK_OAUTH_SCOPE=organizations:read
 `ZENDESK_OAUTH_SCOPE` is only the default/fallback scope. Runtime code explicitly requests the exact scopes required for each operation.
 
 Protect `.env` and the `.pfx` with NTFS permissions so only administrators and the Scheduled Task service account can read them. Neither file belongs in Git.
+
+Before continuing, verify that the configured PFX path exists and that ignored production files have not dirtied the repository:
+
+```powershell
+$pfx = (Select-String -Path .\.env -Pattern "^ENTRA_CERTIFICATE_PATH=").Line.Split("=",2)[1]
+Test-Path $pfx
+git status
+```
+
+`Test-Path` should return `True`, and `git status` should remain clean.
 
 ## 7. Validate authentication
 
@@ -354,11 +370,22 @@ python .\sync.py --full-reconcile
 
 A healthy post-bootstrap/post-apply full reconcile should contain only expected `NO CHANGE` and `PROTECTED` rows unless authoritative Entra changes occurred after the last apply.
 
+For an existing-production host migration, validate the transferred baseline **before** enabling scheduled writes: run the normal incremental dry run first, then `--full-reconcile`. A healthy migrated baseline should normally produce zero incremental changes unless a real Entra lifecycle change occurred during the migration window.
+
 ## 11. Configure the Windows Scheduled Task
 
-Run the root entrypoint with `--apply`; do not schedule bootstrap scripts.
+Run the root entrypoint with `--apply`; do not schedule bootstrap scripts. Use **Create Task** rather than the Basic Task wizard so the service account, restart behavior, overlap protection, and working directory are explicit.
 
-Recommended action shape:
+Recommended **General** settings:
+
+- name: `Entra Zendesk Sync`
+- run as a dedicated service account or other controlled identity
+- select **Run whether user is logged on or not**
+- **Run with highest privileges** is not normally required unless your environment specifically requires it
+
+A practical default **Trigger** is hourly synchronization. In Task Scheduler this can be configured as a daily trigger that repeats every `1 hour` for a duration of `1 day`, with the trigger enabled.
+
+Recommended **Action**:
 
 ```text
 Program/script:
@@ -371,6 +398,8 @@ Start in:
 C:\SysadminBot\EntraZendeskSync
 ```
 
+The **Start in** directory is important because configuration, cache, and log paths are resolved relative to the repository root.
+
 Use a dedicated service account or other controlled identity with:
 
 - read/execute access to the repository and virtual environment
@@ -378,9 +407,20 @@ Use a dedicated service account or other controlled identity with:
 - modify access to `cache\` and `logs\`
 - no unnecessary interactive privileges
 
-Choose a schedule appropriate for how quickly Entra lifecycle changes should reach Zendesk. Standard recurring schedules should not overlap; configure the task not to start a second instance while a previous run is still active.
+For a server, the usual **Conditions** configuration is to leave idle, battery-power, and network-connection gating disabled unless your environment has a specific reason to use them.
 
-Run the task manually once after creation and inspect its timestamped log before relying on the schedule.
+Recommended **Settings**:
+
+- **Allow task to be run on demand**: enabled
+- **Run task as soon as possible after a scheduled start is missed**: enabled
+- if the task fails, restart every `15 minutes`, up to `3` attempts
+- stop the task if it runs longer than `30 minutes`
+- force-stop it if it does not end when requested
+- if the task is already running: **Do not start a new instance**
+
+Choose a different cadence if your operational requirements call for it, but recurring runs must not overlap.
+
+After saving the task, run it manually once under the configured service account. Inspect the timestamped `sync_incremental_apply_*.log`, verify the Task Scheduler **Last Run Result** is `0x0`, and confirm the **Next Run Time** is the expected next occurrence before relying on the schedule.
 
 # Authentication details
 
