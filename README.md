@@ -248,7 +248,27 @@ The wizard:
 
 Production secrets remain in `.env`. `config/config.yaml`, certificates, caches, logs, and review decisions are excluded from Git.
 
+### Migrating an existing production installation to a new host
+
+If the Zendesk tenant has already been bootstrapped and operational synchronization is already in use, **do not rerun bootstrap simply because the runtime is moving to another machine**. Preserve the existing production identity state instead.
+
+After installing the code and dependencies on the new host, securely transfer the existing installation's machine-specific state:
+
+- `.env` — update any machine-specific paths, especially `ENTRA_CERTIFICATE_PATH`
+- the existing `.pfx` certificate/private-key bundle and, optionally, its `.cer` public certificate
+- `config/config.yaml` — validated Entra-group-to-Zendesk-organization mappings and behavior settings
+- `cache/entra_users.json` — the current incremental baseline and retained historical Entra identities
+- any existing conflict/review resolution files under `config\` or `cache\`
+
+`cache/entra_users.json` is especially important. It is not disposable runtime cache: it is both the authoritative incremental comparison baseline and retained identity history used by the reused-email safety checks. Starting an already-bootstrapped production tenant on a new host without that file can make the installation behave like it has no operational history.
+
+Do not copy cached OAuth access tokens; the new host can request fresh tokens as needed. `cache/zendesk_users.json` is also not required for an incremental host migration because full reconciliation can rebuild that snapshot.
+
+After transferring the production state, validate authentication on the new host, run a normal incremental **dry run**, then run a read-only `--full-reconcile` before enabling scheduled `--apply`. Do not run `setup/bootstrap_sync.py --apply` during a host-only migration.
+
 ## 9. Run the initial bootstrap
+
+This step is for a genuinely new deployment that has not already bootstrapped its Zendesk tenant. If you are moving an existing production installation to another host, follow the migration subsection above and skip this step.
 
 Start with the normal bootstrap dry run:
 
