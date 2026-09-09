@@ -26,6 +26,7 @@ config/bootstrap_review_resolutions.yaml
 *.p12
 *.pem
 *.key
+certificates/*
 setup/certificates/*
 !setup/certificates/.gitignore
 
