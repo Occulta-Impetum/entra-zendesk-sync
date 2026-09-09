@@ -70,16 +70,50 @@ The production Scheduled Task should call the small root `sync.py`. Bootstrap-sp
 
 The intended deployment target is a trusted Windows machine/server that can securely hold the Entra certificate private key, Zendesk OAuth client secret, local caches, and logs.
 
-## 1. Clone the repository
+These instructions intentionally assume a bare Windows Server. Do not assume Git, Python, the repository, a virtual environment, certificates, OAuth clients, configuration, or local cache state already exists.
 
-From the folder where the application should live:
+## 0. Install required software
+
+Install the following before cloning the repository:
+
+- **Git for Windows** — required for the initial clone and future `git pull` updates. Git is not required by the Scheduled Task at runtime.
+- **64-bit Python 3.10 or newer** — the codebase uses Python 3.10+ language features. A currently supported 64-bit Python release is recommended.
+- **Windows PowerShell 5.1 or newer** — used by the certificate helper and deployment commands. Standard Windows Server Desktop Experience installations normally already include Windows PowerShell.
+
+When installing Python with the standard Windows installer:
+
+- install Python for all users when appropriate for the server
+- add Python to `PATH` so the initial setup commands are easy to run
+- keep the standard Tcl/Tk component enabled because `setup/configure.py` uses Tkinter for the graphical configuration wizard
+- ensure `pip` is installed
+
+After installation, open a **new PowerShell window** so updated `PATH` values are loaded, then verify:
 
 ```powershell
-git clone https://github.com/Occulta-Impetum/entra-zendesk-sync.git
-cd entra-zendesk-sync
+git --version
+python --version
+python -m pip --version
 ```
 
-For a long-running server deployment, prefer a normal local application path such as `C:\SysadminBot\EntraZendeskSync` or `C:\Apps\entra-zendesk-sync` rather than a OneDrive-synchronized working tree.
+Do not continue until all three commands succeed.
+
+> If the server is Windows Server Core without a graphical desktop/Tkinter capability, the current graphical `setup/configure.py` wizard cannot be used directly there. Run first-time configuration from a Windows machine with GUI support and securely transfer the resulting machine-specific configuration/state as appropriate, or add a non-GUI configuration path before deploying to Server Core.
+
+## 1. Clone the repository
+
+Choose the permanent application folder first. For example:
+
+```powershell
+New-Item -ItemType Directory -Path C:\SysadminBot -Force | Out-Null
+Set-Location C:\SysadminBot
+git clone https://github.com/Occulta-Impetum/entra-zendesk-sync.git EntraZendeskSync
+Set-Location C:\SysadminBot\EntraZendeskSync
+git status
+```
+
+`git status` should show a clean working tree.
+
+For a long-running server deployment, use a normal local application path such as `C:\SysadminBot\EntraZendeskSync` or `C:\Apps\entra-zendesk-sync` rather than a OneDrive-synchronized working tree.
 
 ## 2. Create a Python virtual environment
 
@@ -89,7 +123,7 @@ From the repository root:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Validate the code before configuration:
