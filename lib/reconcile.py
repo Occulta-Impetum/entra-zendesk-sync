@@ -85,7 +85,14 @@ def build_desired_users(
                     "conflict_type": "multiple_groups",
                 })
                 continue
-            selected_mapping = next((mapping for mapping in mappings if str((mapping.get("entra_group") or {}).get("id") or "") == selected_group_id), None)
+            selected_mapping = next(
+                (
+                    mapping
+                    for mapping in mappings
+                    if str((mapping.get("entra_group") or {}).get("id") or "") == selected_group_id
+                ),
+                None,
+            )
             if decision == "use_group" and selected_mapping is not None:
                 desired[user_id] = _desired_from_mapping(user_id, user, selected_mapping)
                 continue
@@ -132,10 +139,9 @@ def plan_reconciliation(
         external_id = str(user.get("external_id") or "").strip()
         if external_id:
             by_external[external_id].append(user)
-        if allow_email_bootstrap:
-            email = _norm_email(user.get("email"))
-            if email:
-                by_email[email].append(user)
+        email = _norm_email(user.get("email"))
+        if email:
+            by_email[email].append(user)
 
     plan: list[dict[str, Any]] = []
     matched_zendesk_ids: set[int] = set()
@@ -180,6 +186,48 @@ def plan_reconciliation(
             elif len(email_matches) == 1:
                 zendesk_user = email_matches[0]
                 matched_by = "email"
+        else:
+            # Operational mode never uses email to establish identity ownership, but an
+            # exact email collision must still be inspected before CREATE. This prevents
+            # duplicate users and preserves protected staff accounts such as agents/admins.
+            email_matches = by_email.get(desired["email"], []) if desired["email"] else []
+            if len(email_matches) > 1:
+                row = _row(
+                    desired,
+                    "CONFLICT",
+                    "No Zendesk user matched this Entra external_id, but multiple Zendesk users own the desired email address.",
+                )
+                row["conflict_type"] = "operational_email_collision_multiple"
+                row["zendesk_candidates"] = [_zendesk_candidate(item) for item in email_matches]
+                plan.append(row)
+                continue
+            if len(email_matches) == 1:
+                collision = email_matches[0]
+                collision_id = int(collision.get("id"))
+                collision_role = str(collision.get("role") or "").strip().lower()
+                matched_zendesk_ids.add(collision_id)
+                if protect_zendesk_staff_roles and collision_role in STAFF_ROLES:
+                    plan.append(
+                        _row(
+                            desired,
+                            "PROTECTED",
+                            f"Desired email is already owned by Zendesk {collision_role}; operational mode will not adopt or replace that identity.",
+                            collision,
+                            "email_collision",
+                        )
+                    )
+                else:
+                    row = _row(
+                        desired,
+                        "CONFLICT",
+                        "No Zendesk user matched this Entra external_id, but the desired email is already owned by another Zendesk identity. Operational mode will not adopt by email.",
+                        collision,
+                        "email_collision",
+                    )
+                    row["conflict_type"] = "operational_email_collision"
+                    row["zendesk_candidates"] = [_zendesk_candidate(collision)]
+                    plan.append(row)
+                continue
 
         if zendesk_user is None:
             if decision == "skip":
@@ -189,7 +237,7 @@ def plan_reconciliation(
             elif allow_email_bootstrap:
                 plan.append(_row(desired, "CREATE", "No Zendesk user matched by external_id or email."))
             else:
-                plan.append(_row(desired, "CREATE", "No Zendesk user matched this Entra external_id; operational mode does not match by email."))
+                plan.append(_row(desired, "CREATE", "No Zendesk user matched this Entra external_id and the desired email is unused."))
             continue
 
         zendesk_id = int(zendesk_user.get("id"))
@@ -266,7 +314,15 @@ def plan_reconciliation(
                 continue
             role = str(zendesk_user.get("role") or "").strip().lower()
             if protect_zendesk_staff_roles and role in STAFF_ROLES:
-                plan.append({"action": "PROTECTED", "entra_id": entra_id, "name": str(zendesk_user.get("name") or ""), "email": _norm_email(zendesk_user.get("email")), "zendesk_id": zendesk_id, "matched_by": "external_id", "reason": f"Linked Zendesk {role} is out of scope; staff roles are protected."})
+                plan.append({
+                    "action": "PROTECTED",
+                    "entra_id": entra_id,
+                    "name": str(zendesk_user.get("name") or ""),
+                    "email": _norm_email(zendesk_user.get("email")),
+                    "zendesk_id": zendesk_id,
+                    "matched_by": "external_id",
+                    "reason": f"Linked Zendesk {role} is out of scope; staff roles are protected.",
+                })
                 continue
             if bool(zendesk_user.get("suspended")):
                 action = "NO CHANGE"
@@ -274,8 +330,39 @@ def plan_reconciliation(
             else:
                 action = "SUSPEND"
                 reason = "Linked Zendesk user is no longer in any configured Entra group."
-            plan.append({"action": action, "entra_id": entra_id, "name": str(zendesk_user.get("name") or ""), "email": _norm_email(zendesk_user.get("email")), "zendesk_id": zendesk_id, "matched_by": "external_id", "reason": reason})
+            plan.append({
+                "action": action,
+                "entra_id": entra_id,
+                "name": str(zendesk_user.get("name") or ""),
+                "email": _norm_email(zendesk_user.get("email")),
+                "zendesk_id": zendesk_id,
+                "matched_by": "external_id",
+                "reason": reason,
+            })
     return sorted(plan, key=lambda row: (str(row.get("action")), str(row.get("name")).lower()))
+
+
+def _resolve_manager_from_snapshot(
+    desired: dict[str, Any],
+    *,
+    by_external: dict[str, list[dict[str, Any]]],
+    by_email: dict[str, list[dict[str, Any]]],
+) -> tuple[int | None, str]:
+    manager_entra_id = str(desired.get("manager_entra_id") or "").strip()
+    manager_email = _norm_email(desired.get("manager_email"))
+    if manager_entra_id:
+        matches = by_external.get(f"{EXTERNAL_ID_PREFIX}{manager_entra_id}", [])
+        if len(matches) == 1:
+            return int(matches[0]["id"]), "manager external_id"
+        if len(matches) > 1:
+            return None, "multiple Zendesk users share manager external_id"
+    if manager_email:
+        matches = by_email.get(manager_email, [])
+        if len(matches) == 1:
+            return int(matches[0]["id"]), "manager email fallback (relationship resolution only)"
+        if len(matches) > 1:
+            return None, "multiple Zendesk users match manager email"
+    return None, "manager Zendesk identity not found"
 
 
 def add_user_field_actions(
@@ -286,6 +373,16 @@ def add_user_field_actions(
     field_keys: dict[str, str],
 ) -> list[dict[str, Any]]:
     by_zendesk_id = {int(user["id"]): user for user in zendesk_users if user.get("id") is not None}
+    by_external: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_email: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for user in zendesk_users:
+        external_id = str(user.get("external_id") or "").strip()
+        if external_id:
+            by_external[external_id].append(user)
+        email = _norm_email(user.get("email"))
+        if email:
+            by_email[email].append(user)
+
     plan_by_entra = {str(row.get("entra_id") or ""): row for row in plan if row.get("entra_id")}
     manager_key = field_keys["manager"]
     employee_key = field_keys["employee_id"]
@@ -318,11 +415,30 @@ def add_user_field_actions(
             reasons.append(f"job title {current_title or '-'} -> {desired_title or '-'}")
 
         manager_entra_id = str(desired.get("manager_entra_id") or "").strip()
-        manager_row = plan_by_entra.get(manager_entra_id) if manager_entra_id else None
-        target_zendesk_id = manager_row.get("zendesk_id") if manager_row else None
         current_manager = str(existing_fields.get(manager_key) or "").strip()
-        if manager_entra_id:
-            if target_zendesk_id is None or current_manager != str(target_zendesk_id):
+        target_zendesk_id: int | None = None
+        manager_resolution = ""
+        if manager_entra_id or desired.get("manager_email"):
+            target_zendesk_id, manager_resolution = _resolve_manager_from_snapshot(
+                desired,
+                by_external=by_external,
+                by_email=by_email,
+            )
+            if target_zendesk_id is None:
+                # A full reconcile is a verifier, not a place to invent manager links.
+                # Surface unresolved manager identity as a conflict instead of a false
+                # UPDATE MANAGER that cannot be applied deterministically.
+                row["action"] = "CONFLICT"
+                row["reason"] = manager_resolution
+                row["conflict_type"] = "manager_resolution"
+                row["employee_id"] = desired_employee
+                row["job_title"] = desired_title
+                row["manager_entra_id"] = manager_entra_id
+                row["manager_name"] = str(desired.get("manager_name") or "")
+                row["manager_email"] = str(desired.get("manager_email") or "")
+                row["manager_zendesk_id"] = None
+                continue
+            if current_manager != str(target_zendesk_id):
                 actions.append("UPDATE MANAGER")
                 target_name = desired.get("manager_name") or desired.get("manager_email") or manager_entra_id
                 reasons.append(f"manager -> {target_name}")
@@ -341,6 +457,8 @@ def add_user_field_actions(
         row["manager_name"] = str(desired.get("manager_name") or "")
         row["manager_email"] = str(desired.get("manager_email") or "")
         row["manager_zendesk_id"] = target_zendesk_id
+        if manager_resolution:
+            row["manager_resolution"] = manager_resolution
     return sorted(plan, key=lambda row: (str(row.get("action")), str(row.get("name") or "").lower()))
 
 
