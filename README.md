@@ -252,19 +252,34 @@ Production secrets remain in `.env`. `config/config.yaml`, certificates, caches,
 
 If the Zendesk tenant has already been bootstrapped and operational synchronization is already in use, **do not rerun bootstrap simply because the runtime is moving to another machine**. Preserve the existing production identity state instead.
 
-After installing the code and dependencies on the new host, securely transfer the existing installation's machine-specific state:
+If the application lives under a broader automation root such as `C:\SysadminBot`, the simplest migration is usually to copy that entire tree to the new server. That preserves the application files and the machine-specific state together, including `.env`, certificates, `config/config.yaml`, `cache/entra_users.json`, and any review/conflict decisions. Copying the whole tree is preferred over manually picking individual state files when the parent automation folder is already the canonical home for the installation.
 
-- `.env` — update any machine-specific paths, especially `ENTRA_CERTIFICATE_PATH`
+Treat the copied tree as **application data, configuration, and operational state**, not as a complete replacement for rebuilding the machine runtime. On the new host:
+
+1. install machine-wide Python and Git
+2. copy the existing automation tree, for example `C:\SysadminBot`
+3. for each Python project, recreate its virtual environment and reinstall dependencies from `requirements.txt`; do not rely on a copied `.venv` because virtual environments can contain machine/interpreter-specific paths
+4. update any machine-specific paths in `.env`, especially `ENTRA_CERTIFICATE_PATH`
+5. recreate Scheduled Tasks rather than assuming they moved with the folder
+6. reapply/verify NTFS permissions for `.env`, private certificates, `cache\`, and `logs\`
+7. validate authentication on the new host
+8. run a normal incremental **dry run**
+9. run a read-only `--full-reconcile`
+10. only then enable scheduled `--apply`
+
+The production state that must survive the migration includes:
+
+- `.env`
 - the existing `.pfx` certificate/private-key bundle and, optionally, its `.cer` public certificate
-- `config/config.yaml` — validated Entra-group-to-Zendesk-organization mappings and behavior settings
-- `cache/entra_users.json` — the current incremental baseline and retained historical Entra identities
+- `config/config.yaml`
+- `cache/entra_users.json`
 - any existing conflict/review resolution files under `config\` or `cache\`
 
 `cache/entra_users.json` is especially important. It is not disposable runtime cache: it is both the authoritative incremental comparison baseline and retained identity history used by the reused-email safety checks. Starting an already-bootstrapped production tenant on a new host without that file can make the installation behave like it has no operational history.
 
-Do not copy cached OAuth access tokens; the new host can request fresh tokens as needed. `cache/zendesk_users.json` is also not required for an incremental host migration because full reconciliation can rebuild that snapshot.
+Cached OAuth access tokens do not need to be preserved; the new host can request fresh tokens as needed. `cache/zendesk_users.json` and old logs are also optional because full reconciliation can rebuild the Zendesk snapshot and new runs will create fresh logs.
 
-After transferring the production state, validate authentication on the new host, run a normal incremental **dry run**, then run a read-only `--full-reconcile` before enabling scheduled `--apply`. Do not run `setup/bootstrap_sync.py --apply` during a host-only migration.
+Do not run `setup/bootstrap_sync.py --apply` during a host-only migration.
 
 ## 9. Run the initial bootstrap
 
