@@ -2,7 +2,7 @@
 param(
     [string]$Subject = "CN=Entra Zendesk Sync",
     [int]$ValidityYears = 2,
-    [string]$OutputDirectory = (Join-Path $PSScriptRoot "certificates")
+    [string]$OutputDirectory = (Join-Path (Split-Path $PSScriptRoot -Parent) "certificates")
 )
 
 $ErrorActionPreference = "Stop"
