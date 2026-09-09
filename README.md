@@ -80,9 +80,9 @@ Install the following before cloning the repository:
 - **64-bit Python 3.10 or newer** — the codebase uses Python 3.10+ language features. A currently supported 64-bit Python release is recommended.
 - **Windows PowerShell 5.1 or newer** — used by the certificate helper and deployment commands. Standard Windows Server Desktop Experience installations normally already include Windows PowerShell.
 
-When installing Python with the standard Windows installer:
+When installing Python with the standard Windows installer on a production server:
 
-- install Python for all users when appropriate for the server
+- **install Python for all users** so the runtime is machine-wide rather than tied to an administrator's personal Windows profile; this avoids making the Scheduled Task dependent on a path under `C:\Users\<username>\AppData\Local\Programs\Python\...`
 - add Python to `PATH` so the initial setup commands are easy to run
 - keep the standard Tcl/Tk component enabled because `setup/configure.py` uses Tkinter for the graphical configuration wizard
 - ensure `pip` is installed
@@ -93,9 +93,10 @@ After installation, open a **new PowerShell window** so updated `PATH` values ar
 git --version
 python --version
 python -m pip --version
+where.exe python
 ```
 
-Do not continue until all three commands succeed.
+Do not continue until all four commands succeed. For a production server, confirm the selected `python.exe` is the machine-wide installation and is **not** under a specific administrator's user profile.
 
 > If the server is Windows Server Core without a graphical desktop/Tkinter capability, the current graphical `setup/configure.py` wizard cannot be used directly there. Run first-time configuration from a Windows machine with GUI support and securely transfer the resulting machine-specific configuration/state as appropriate, or add a non-GUI configuration path before deploying to Server Core.
 
