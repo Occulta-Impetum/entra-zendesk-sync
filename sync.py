@@ -51,6 +51,15 @@ def parse_args() -> argparse.Namespace:
             "only after all writes complete successfully."
         ),
     )
+    parser.add_argument(
+        "--catch-up-apply",
+        action="store_true",
+        help=(
+            "RECOVERY ONLY: rebuild and apply the incremental plan while bypassing only the Entra change-volume "
+            "guard. Identity conflicts and all normal write protections remain enforced. Use after a reviewed "
+            "read-only full reconcile when a stale baseline has accumulated legitimate changes."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -60,12 +69,16 @@ def main() -> int:
         args.full_reconcile or args.refresh_zendesk_cache,
         args.initialize_baseline,
         args.apply,
+        args.catch_up_apply,
     ))
     if selected_modes > 1:
-        print("ERROR: --initialize-baseline, --full-reconcile, and --apply cannot be combined.")
+        print("ERROR: --initialize-baseline, --full-reconcile, --apply, and --catch-up-apply cannot be combined.")
         return 2
 
-    if args.apply:
+    if args.catch_up_apply:
+        prefix = "sync_catch_up_apply"
+        runner = lambda: run_operational_apply(enforce_change_guard=False)
+    elif args.apply:
         prefix = "sync_incremental_apply"
         runner = run_operational_apply
     elif args.initialize_baseline:
