@@ -56,6 +56,24 @@ class EntraDiffTests(unittest.TestCase):
         self.assertIn("51 total changes", str(context.exception))
 
     @patch("lib.cache._change_guard_settings", return_value=(10, 5.0, 50, 15.0))
+    def test_explicit_recovery_can_bypass_change_volume_guard(self, _settings_mock) -> None:
+        previous = {
+            "current": {f"user-{index}": {"name": f"User {index}"} for index in range(100)},
+            "history": {},
+        }
+        current = {f"user-{index}": {"name": f"User {index}"} for index in range(80)}
+
+        new_ids, changed_ids, removed_ids = diff_entra_users(
+            current,
+            previous,
+            enforce_change_guard=False,
+        )
+
+        self.assertEqual(new_ids, set())
+        self.assertEqual(changed_ids, set())
+        self.assertEqual(len(removed_ids), 20)
+
+    @patch("lib.cache._change_guard_settings", return_value=(10, 5.0, 50, 15.0))
     def test_reasonable_change_set_passes_guard(self, _settings_mock) -> None:
         previous = {
             "current": {
