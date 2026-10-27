@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
             "only after all writes complete successfully."
         ),
     )
-    parser.add_argument(
+    parser.add_argument(\n        "--catch-up-dry-run",\n        action="store_true",\n        help=(\n            "RECOVERY ONLY: preview the incremental backlog while bypassing only the Entra change-volume guard. "\n            "No Zendesk data or Entra cache is modified."\n        ),\n    )\n    parser.add_argument(
         "--catch-up-apply",
         action="store_true",
         help=(
@@ -69,15 +69,19 @@ def main() -> int:
         args.full_reconcile or args.refresh_zendesk_cache,
         args.initialize_baseline,
         args.apply,
+        args.catch_up_dry_run,
         args.catch_up_apply,
     ))
     if selected_modes > 1:
-        print("ERROR: --initialize-baseline, --full-reconcile, --apply, and --catch-up-apply cannot be combined.")
+        print("ERROR: --initialize-baseline, --full-reconcile, --apply, --catch-up-dry-run, and --catch-up-apply cannot be combined.")
         return 2
 
     if args.catch_up_apply:
         prefix = "sync_catch_up_apply"
         runner = lambda: run_operational_apply(enforce_change_guard=False)
+    elif args.catch_up_dry_run:
+        prefix = "sync_catch_up_dry_run"
+        runner = lambda: run_incremental_dry_run(enforce_change_guard=False)
     elif args.apply:
         prefix = "sync_incremental_apply"
         runner = run_operational_apply
