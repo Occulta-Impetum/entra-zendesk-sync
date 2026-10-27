@@ -503,17 +503,25 @@ Type `ADOPT` when prompted. Then rerun the full reconcile and require zero
 unresolved conflicts before catch-up.
 
 If the incremental Entra baseline is stale enough that the normal volume guard
-blocks a legitimate reviewed backlog, use the explicit recovery-only mode:
+blocks a legitimate reviewed backlog, first preview the exact incremental
+catch-up plan:
+
+```powershell
+python .\sync.py --catch-up-dry-run
+```
+
+If that preview contains no unresolved conflicts and the planned changes match
+the reviewed full reconciliation, apply the one-time catch-up:
 
 ```powershell
 python .\sync.py --catch-up-apply
 ```
 
-`--catch-up-apply` bypasses only the Entra change-volume guard. It rebuilds the
-plan from fresh Entra data at execution time and retains normal identity
-matching, collision protection, conflict refusal, staff protection, and atomic
-baseline advancement. It is not for Scheduled Task configuration; normal
-automation must continue to use `sync.py --apply`.
+Both catch-up modes bypass only the Entra change-volume guard. The apply mode
+rebuilds the plan from fresh Entra data at execution time and retains normal
+identity matching, collision protection, conflict refusal, staff protection,
+and atomic baseline advancement. These modes are not for Scheduled Task
+configuration; normal automation must continue to use `sync.py --apply`.
 
 After catch-up, validate:
 
