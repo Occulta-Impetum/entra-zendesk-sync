@@ -66,7 +66,7 @@ def main() -> int:
         ]
         if not conflicts:
             print("No operational SSO email-collision conflicts are present in cache/conflicts.json.")
-            print("Run: python .\sync.py --full-reconcile")
+            print("Run: python ./sync.py --full-reconcile")
             return 0
 
         config = load_zendesk_config()
@@ -140,7 +140,7 @@ def main() -> int:
         if not args.apply:
             print("Preview complete. No Zendesk data was modified.")
             print("To apply these reviewed adoptions, run:")
-            print("  python .\setup\recover_sso_adoptions.py --apply")
+            print("  python ./setup/recover_sso_adoptions.py --apply")
             return 0
 
         confirmation = input(
@@ -164,7 +164,7 @@ def main() -> int:
             )
 
         print("SSO adoption repair complete.")
-        print("Next: python .\sync.py --full-reconcile")
+        print("Next: python ./sync.py --full-reconcile")
         return 0
 
     except (ConflictSnapshotError, ZendeskError, KeyError, TypeError, ValueError) as exc:
