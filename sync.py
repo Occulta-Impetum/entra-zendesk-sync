@@ -51,7 +51,15 @@ def parse_args() -> argparse.Namespace:
             "only after all writes complete successfully."
         ),
     )
-    parser.add_argument(\n        "--catch-up-dry-run",\n        action="store_true",\n        help=(\n            "RECOVERY ONLY: preview the incremental backlog while bypassing only the Entra change-volume guard. "\n            "No Zendesk data or Entra cache is modified."\n        ),\n    )\n    parser.add_argument(
+    parser.add_argument(
+        "--catch-up-dry-run",
+        action="store_true",
+        help=(
+            "RECOVERY ONLY: preview the incremental backlog while bypassing only the Entra change-volume guard. "
+            "No Zendesk data or Entra cache is modified."
+        ),
+    )
+    parser.add_argument(
         "--catch-up-apply",
         action="store_true",
         help=(
