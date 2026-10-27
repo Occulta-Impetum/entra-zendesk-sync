@@ -151,15 +151,27 @@ def _create_action(record: dict[str, Any], *, email_reuse: bool = False) -> str:
     return " + ".join(actions)
 
 
-def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any] | None]:
-    """Build a targeted operational plan without downloading every Zendesk user."""
+def build_incremental_plan(
+    *,
+    enforce_change_guard: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]], dict[str, Any] | None]:
+    """Build a targeted operational plan without downloading every Zendesk user.
+
+    Normal scheduled runs enforce the Entra change-volume guard. An explicit
+    administrator catch-up workflow may disable only that guard while retaining
+    all identity/conflict protections.
+    """
     print("\n[1/4] Collecting fresh authoritative Entra state...", flush=True)
     config, current, membership_rows = collect_current_entra_state()
     if any(row.get("action") == "CONFLICT" for row in membership_rows):
         return membership_rows, current, load_entra_users_cache()
 
     previous_cache = load_entra_users_cache()
-    new_ids, changed_ids, removed_ids = diff_entra_users(current, previous_cache)
+    new_ids, changed_ids, removed_ids = diff_entra_users(
+        current,
+        previous_cache,
+        enforce_change_guard=enforce_change_guard,
+    )
     previous_current = previous_cache.get("current", {}) if previous_cache else {}
     print(
         f"      Entra change set: {len(new_ids)} new, {len(changed_ids)} changed, "
@@ -167,6 +179,8 @@ def build_incremental_plan() -> tuple[list[dict[str, Any]], dict[str, dict[str, 
     )
     if previous_cache is None:
         print("      No prior Entra cache exists; this first operational run will inspect all current users once.")
+    elif not enforce_change_guard:
+        print("      RECOVERY MODE: change-volume guard bypassed by explicit administrator request.")
 
     if not new_ids and not changed_ids and not removed_ids:
         print("      No authoritative Entra changes; skipping Zendesk authentication and lookups.")
