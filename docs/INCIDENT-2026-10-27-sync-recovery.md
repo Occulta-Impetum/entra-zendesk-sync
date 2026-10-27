@@ -57,6 +57,15 @@ The recovery apply completed successfully:
 - External-ID verification: all 547 expected managed links present
 - Operational Entra baseline saved atomically after successful writes
 
+Post-recovery validation completed successfully:
+
+- Normal incremental dry run: 0 new, 0 changed, 0 removed; 0 plan rows
+- Fresh full reconciliation: 0 unresolved conflicts
+- Full reconciliation result: PROTECTED 1, NO CHANGE 547, PLAN ROWS 548
+- No pending creates, field corrections, lifecycle changes, or manager changes remained
+
+This confirms the production baseline and live Zendesk state are synchronized again.
+
 ## Recovery tooling added
 
 - `setup/recover_sso_adoptions.py`
