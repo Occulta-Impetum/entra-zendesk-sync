@@ -13,6 +13,7 @@ import argparse
 from lib.logging_utils import ConsoleLogTee
 from lib.operational import initialize_entra_baseline, run_incremental_dry_run
 from lib.operational_apply import run_operational_apply
+from lib.full_reconcile_apply import run_full_reconcile_apply
 from lib.runtime import RuntimeOptions, run_read_only
 
 
@@ -63,8 +64,8 @@ def parse_args() -> argparse.Namespace:
         "--catch-up-apply",
         action="store_true",
         help=(
-            "RECOVERY ONLY: rebuild and apply the incremental plan while bypassing only the Entra change-volume "
-            "guard. Identity conflicts and all normal write protections remain enforced. Use after a reviewed "
+            "RECOVERY ONLY: rebuild and apply a fresh complete external-ID-only reconciliation against live "
+            "Zendesk, then advance the incremental baseline only after all writes succeed. Use after a reviewed "
             "read-only full reconcile when a stale baseline has accumulated legitimate changes."
         ),
     )
@@ -86,7 +87,7 @@ def main() -> int:
 
     if args.catch_up_apply:
         prefix = "sync_catch_up_apply"
-        runner = lambda: run_operational_apply(enforce_change_guard=False)
+        runner = run_full_reconcile_apply
     elif args.catch_up_dry_run:
         prefix = "sync_catch_up_dry_run"
         runner = lambda: run_incremental_dry_run(enforce_change_guard=False)
