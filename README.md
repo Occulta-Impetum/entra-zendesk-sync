@@ -469,6 +469,63 @@ Normal production apply:
 python .\sync.py --apply
 ```
 
+## Recovery: SSO-created users and stale incremental baseline
+
+If Zendesk SAML creates an end-user before the provisioning sync assigns the
+managed `external_id`, full reconciliation may report
+`operational_email_collision` conflicts. Use the dedicated recovery tool
+instead of manually editing Zendesk users or rerunning bootstrap.
+
+First refresh the read-only conflict snapshot:
+
+```powershell
+python .\sync.py --full-reconcile
+```
+
+Preview recoverable SSO-created users:
+
+```powershell
+python .\setup\recover_sso_adoptions.py
+```
+
+The recovery tool only marks a candidate READY when the live Zendesk record is
+an end-user, its name and email match the authoritative Entra conflict record,
+its `external_id` is blank, and the target `entra:<object-id>` is not owned by
+another Zendesk user. It never replaces a nonblank external ID.
+
+If every intended candidate is READY, apply:
+
+```powershell
+python .\setup\recover_sso_adoptions.py --apply
+```
+
+Type `ADOPT` when prompted. Then rerun the full reconcile and require zero
+unresolved conflicts before catch-up.
+
+If the incremental Entra baseline is stale enough that the normal volume guard
+blocks a legitimate reviewed backlog, use the explicit recovery-only mode:
+
+```powershell
+python .\sync.py --catch-up-apply
+```
+
+`--catch-up-apply` bypasses only the Entra change-volume guard. It rebuilds the
+plan from fresh Entra data at execution time and retains normal identity
+matching, collision protection, conflict refusal, staff protection, and atomic
+baseline advancement. It is not for Scheduled Task configuration; normal
+automation must continue to use `sync.py --apply`.
+
+After catch-up, validate:
+
+```powershell
+python .\sync.py
+python .\sync.py --full-reconcile
+```
+
+The incremental dry run should show no pending Entra changes, and the full
+reconcile should contain only expected NO CHANGE/PROTECTED rows or newly
+occurring legitimate changes.
+
 Normal operation is incremental. The sync:
 
 1. reads the complete current in-scope Entra state
