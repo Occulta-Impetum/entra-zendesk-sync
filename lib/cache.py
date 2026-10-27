@@ -228,8 +228,10 @@ def _validate_change_volume(
 def diff_entra_users(
     current: dict[str, dict[str, Any]],
     previous_cache: dict[str, Any] | None,
+    *,
+    enforce_change_guard: bool = True,
 ) -> tuple[set[str], set[str], set[str]]:
-    """Return new, changed, and removed Entra IDs after enforcing change-volume safety."""
+    """Return new, changed, and removed Entra IDs, normally enforcing change-volume safety.\n\n    The guard may be bypassed only by an explicit administrator recovery workflow.\n    Normal scheduled operation must leave enforce_change_guard enabled.\n    """
     previous = previous_cache.get("current", {}) if previous_cache else {}
     if not isinstance(previous, dict):
         previous = {}
@@ -243,7 +245,7 @@ def diff_entra_users(
         if current[user_id] != previous[user_id]
     }
 
-    if previous_cache is not None:
+    if previous_cache is not None and enforce_change_guard:
         _validate_change_volume(
             previous_count=len(previous_ids),
             new_count=len(new_ids),
