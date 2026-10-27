@@ -390,11 +390,18 @@ def print_incremental_plan(plan: list[dict[str, Any]]) -> None:
         print()
 
 
-def run_incremental_dry_run() -> int:
-    print("Entra -> Zendesk Sync (OPERATIONAL INCREMENTAL DRY RUN)")
-    print("=====================================================")
+def run_incremental_dry_run(*, enforce_change_guard: bool = True) -> int:
+    label = (
+        "OPERATIONAL CATCH-UP DRY RUN"
+        if not enforce_change_guard
+        else "OPERATIONAL INCREMENTAL DRY RUN"
+    )
+    print(f"Entra -> Zendesk Sync ({label})")
+    print("=" * (23 + len(label)))
     try:
-        plan, _current, _previous = build_incremental_plan()
+        plan, _current, _previous = build_incremental_plan(
+            enforce_change_guard=enforce_change_guard,
+        )
     except (OperationalError, CacheError, ConfigError, GraphError, ResolutionError, ZendeskError, KeyError, ValueError) as exc:
         print(f"\nERROR: {exc}")
         return 1
