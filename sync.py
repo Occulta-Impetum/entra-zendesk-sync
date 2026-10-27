@@ -56,8 +56,8 @@ def parse_args() -> argparse.Namespace:
         "--catch-up-dry-run",
         action="store_true",
         help=(
-            "RECOVERY ONLY: preview the incremental backlog while bypassing only the Entra change-volume guard. "
-            "No Zendesk data or Entra cache is modified."
+            "RECOVERY ONLY: preview the same fresh complete external-ID-only reconciliation used by "
+            "--catch-up-apply. No Zendesk data or Entra cache is modified."
         ),
     )
     parser.add_argument(
@@ -89,8 +89,14 @@ def main() -> int:
         prefix = "sync_catch_up_apply"
         runner = run_full_reconcile_apply
     elif args.catch_up_dry_run:
+        options = RuntimeOptions(
+            label="RECOVERY FULL-RECONCILE DRY RUN",
+            allow_email_bootstrap=False,
+            force_refresh=True,
+            include_bootstrap_review=False,
+        )
         prefix = "sync_catch_up_dry_run"
-        runner = lambda: run_incremental_dry_run(enforce_change_guard=False)
+        runner = lambda: run_read_only(options)
     elif args.apply:
         prefix = "sync_incremental_apply"
         runner = run_operational_apply
