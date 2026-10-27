@@ -252,10 +252,16 @@ def execute_incremental_plan(
     return written, skipped
 
 
-def run_operational_apply() -> int:
-    """Build a fresh guarded plan and execute it; never applies a stale dry-run plan."""
+def run_operational_apply(*, enforce_change_guard: bool = True) -> int:
+    """Build a fresh plan and execute it; never applies a stale dry-run plan.
+
+    Normal scheduled operation enforces the change-volume guard. Recovery mode
+    may bypass only that guard; identity conflicts still refuse application.
+    """
     try:
-        plan, current, previous = build_incremental_plan()
+        plan, current, previous = build_incremental_plan(
+            enforce_change_guard=enforce_change_guard,
+        )
         from lib.config import load_config
 
         fields = (load_config().get("zendesk") or {}).get("user_fields") or {}
