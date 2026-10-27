@@ -503,24 +503,29 @@ Type `ADOPT` when prompted. Then rerun the full reconcile and require zero
 unresolved conflicts before catch-up.
 
 If the incremental Entra baseline is stale enough that the normal volume guard
-blocks a legitimate reviewed backlog, first preview the exact incremental
-catch-up plan:
+blocks a legitimate reviewed backlog, preview the recovery plan:
 
 ```powershell
 python .\sync.py --catch-up-dry-run
 ```
 
-If that preview contains no unresolved conflicts and the planned changes match
-the reviewed full reconciliation, apply the one-time catch-up:
+This recovery preview is a fresh complete external-ID-only reconciliation
+against live Zendesk. It is intentionally broader than the normal incremental
+Entra-delta plan so it also catches Zendesk drift that accumulated while the
+baseline was stalled.
+
+If that preview contains no unresolved conflicts and the planned changes are
+expected, apply the one-time catch-up:
 
 ```powershell
 python .\sync.py --catch-up-apply
 ```
 
-Both catch-up modes bypass only the Entra change-volume guard. The apply mode
-rebuilds the plan from fresh Entra data at execution time and retains normal
-identity matching, collision protection, conflict refusal, staff protection,
-and atomic baseline advancement. These modes are not for Scheduled Task
+The apply command rebuilds that same complete live reconciliation immediately
+before writing. It retains operational external-ID identity ownership, email
+collision protection, conflict refusal, staff protection, and manager
+validation. The incremental Entra baseline advances only after the full
+reconciliation succeeds. These recovery modes are not for Scheduled Task
 configuration; normal automation must continue to use `sync.py --apply`.
 
 After catch-up, validate:
